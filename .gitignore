@@ -1,2 +1,3 @@
 # Forge runtime data — cycle outputs, logs, temp files
 .forge_data/
+.env

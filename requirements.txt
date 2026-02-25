@@ -5,6 +5,9 @@
 # Your Google AI Pro Ultra subscription covers the usage.
 google-genai>=1.50.0
 
+# Environment variable loading
+python-dotenv>=1.0.0
+
 # Note: The following are NOT listed because they're CLI tools,
 # not Python packages:
 #   - claude (Claude Code CLI) — install via npm: npm install -g @anthropic-ai/claude-code

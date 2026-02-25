@@ -2,7 +2,7 @@
 name = "forge"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["google-genai"]
+dependencies = ["google-genai", "python-dotenv"]
 
 [project.scripts]
 forge = "forge.run_overnight:main"

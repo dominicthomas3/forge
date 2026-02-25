@@ -74,6 +74,12 @@ class ForgeConfig:
         self.forge_data_dir = Path(self.forge_data_dir).resolve()
 
         # Load google_api_key from environment if not set
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass  # dotenv not installed, fall back to existing env vars
+
         if not self.google_api_key:
             self.google_api_key = os.environ.get("GOOGLE_API_KEY", "")
 
