@@ -80,8 +80,7 @@ async def run_session(args, config: ForgeConfig) -> None:
         categories=args.categories,
     )
 
-    print("
-" + "=" * 60)
+    print("\n" + "=" * 60)
     print("  MORPHEUS SESSION COMPLETE")
     print("=" * 60)
     print(f"  Exchanges: {report.total_messages}")
@@ -91,10 +90,8 @@ async def run_session(args, config: ForgeConfig) -> None:
     print("=" * 60)
 
     if report.first_session:
-        print("
-  Morpheus introduced himself. Spectre will remember.")
-        print("  Future sessions start naturally — no re-introduction needed.
-")
+        print("\n  Morpheus introduced himself. Spectre will remember.")
+        print("  Future sessions start naturally — no re-introduction needed.\n")
 
 
 def main():
@@ -159,8 +156,7 @@ Cost: ~$0.003-0.005 per exchange (Spectre API). Generation + evaluation: $0 (sub
     total_exchanges = args.exchanges * len(args.categories or ["casual", "memory", "routing", "tools", "personality", "edge"])
     est_cost = total_exchanges * 0.004
 
-    print("
-" + "=" * 60)
+    print("\n" + "=" * 60)
     print("  MORPHEUS — Spectre's Sparring Partner")
     print("=" * 60)
     print(f"  Target:     {config.target_project}")
@@ -180,30 +176,24 @@ Cost: ~$0.003-0.005 per exchange (Spectre API). Generation + evaluation: $0 (sub
     # Validate
     issues = config.validate()
     if issues:
-        print("
-Configuration issues:")
+        print("\nConfiguration issues:")
         for issue in issues:
             print(f"  ! {issue}")
 
     if args.dry_run:
-        print("
-Dry run complete.")
+        print("\nDry run complete.")
         sys.exit(0)
 
     # Run
-    print("
-Starting session...
-")
+    print("\nStarting session...\n")
     try:
         asyncio.run(run_session(args, config))
     except KeyboardInterrupt:
-        print("
-Session interrupted.")
+        print("\nSession interrupted.")
         sys.exit(130)
     except Exception as e:
         logging.exception("Session crashed")
-        print(f"
-Session crashed: {e}")
+        print(f"\nSession crashed: {e}")
         sys.exit(1)
 
 

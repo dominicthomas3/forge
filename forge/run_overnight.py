@@ -187,8 +187,7 @@ Runs on subscriptions: Claude Max + Google AI Pro Ultra = $0 marginal cost.
 
     # ── Validate config ───────────────────────────────────────────────
 
-    print("
-" + "=" * 60)
+    print("\n" + "=" * 60)
     print("  FORGE — Autonomous Development Pipeline")
     print("=" * 60)
     print(f"  Target:      {config.target_project}")
@@ -205,23 +204,19 @@ Runs on subscriptions: Claude Max + Google AI Pro Ultra = $0 marginal cost.
 
     issues = config.validate()
     if issues:
-        print("
-Configuration issues:")
+        print("\nConfiguration issues:")
         for issue in issues:
             print(f"  ! {issue}")
 
         if args.dry_run:
-            print("
-Dry run complete. Fix the issues above before running.")
+            print("\nDry run complete. Fix the issues above before running.")
             sys.exit(1)
 
         # Non-fatal issues: warn but continue if not dry run
         # (CLIs might not be detectable in this environment but work on the user's machine)
-        print("
-Proceeding despite warnings (CLIs may work at runtime)...")
+        print("\nProceeding despite warnings (CLIs may work at runtime)...")
     else:
-        print("
-Configuration validated.")
+        print("\nConfiguration validated.")
 
     if args.dry_run:
         print("Dry run complete. Everything looks good.")
@@ -229,26 +224,21 @@ Configuration validated.")
 
     # ── Run pipeline ──────────────────────────────────────────────────
 
-    print("
-Starting pipeline...
-")
+    print("\nStarting pipeline...\n")
     orchestrator = Orchestrator(config=config, task_description=task_description)
 
     try:
         report_path = orchestrator.run()
-        print(f"
-Pipeline complete. Morning report: {report_path}")
+        print(f"\nPipeline complete. Morning report: {report_path}")
     except KeyboardInterrupt:
-        print("
-Pipeline interrupted by user.")
+        print("\nPipeline interrupted by user.")
         report_path = orchestrator._generate_morning_report()
         print(f"Partial report saved: {report_path}")
         sys.exit(130)
     except Exception as e:
         logging.exception("Pipeline crashed")
         report_path = orchestrator._generate_morning_report()
-        print(f"
-Pipeline crashed: {e}")
+        print(f"\nPipeline crashed: {e}")
         print(f"Partial report saved: {report_path}")
         sys.exit(1)
 
