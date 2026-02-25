@@ -159,28 +159,15 @@ class Runner:
         logger.info("Running Claude Code CLI — %d chars prompt", len(prompt))
         start = time.time()
 
-        # Claude Code CLI always uses -p for the prompt.
-        # For very long prompts, write to file and pipe via stdin.
-        if len(prompt) <= _MAX_ARG_LENGTH:
-            cmd = [
-                self._claude_bin,
-                "-p", prompt,
-                "--output-format", "text",
-                "--model", self.config.claude_model,
-                "--dangerously-skip-permissions",
-                "--verbose",
-            ]
-            stdin_data = None
-        else:
-            cmd = [
-                self._claude_bin,
-                "--print",
-                "--output-format", "text",
-                "--model", self.config.claude_model,
-                "--dangerously-skip-permissions",
-                "--verbose",
-            ]
-            stdin_data = prompt
+        cmd = [
+            self._claude_bin,
+            "--print",
+            "--output-format", "text",
+            "--model", self.config.claude_model,
+            "--dangerously-skip-permissions",
+            "--verbose",
+        ]
+        stdin_data = prompt
 
         while True:
             start = time.time()
