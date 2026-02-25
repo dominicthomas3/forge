@@ -249,7 +249,7 @@ class Runner:
             "thinking_config": types.ThinkingConfig(
                 thinking_level=types.ThinkingLevel.HIGH,
             ),
-            "http_options": types.HttpOptions(timeout=timeout),
+            "http_options": types.HttpOptions(timeout=timeout * 1000),
         }
         if system:
             config_kwargs["system_instruction"] = system
