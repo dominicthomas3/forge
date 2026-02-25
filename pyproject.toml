@@ -1,0 +1,9 @@
+[project]
+name = "forge"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["google-genai"]
+
+[project.scripts]
+forge = "forge.run_overnight:main"
+morpheus = "forge.run_morpheus:main"

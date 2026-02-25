@@ -1,0 +1,15 @@
+# Forge — Multi-model autonomous development pipeline
+# Minimal dependencies. The heavy lifting is done by CLIs and SDKs.
+
+# Deep Think SDK (Gemini 3.1 Pro with ThinkingLevel.HIGH)
+# Your Google AI Pro Ultra subscription covers the usage.
+google-genai>=1.50.0
+
+# Note: The following are NOT listed because they're CLI tools,
+# not Python packages:
+#   - claude (Claude Code CLI) — install via npm: npm install -g @anthropic-ai/claude-code
+#   - gemini (Gemini CLI) — install via npm: npm install -g @anthropic-ai/gemini-cli
+#
+# Both require active subscriptions:
+#   - Claude Max (Anthropic) — unlimited Claude Code usage
+#   - Google AI Pro Ultra — unlimited Gemini CLI + Deep Think usage
