@@ -52,61 +52,14 @@ class Runner:
             self._gemini_bin = self.config.resolve_gemini_cli()
 
         logger.info("Running Gemini CLI (Jim) — %d chars prompt", len(prompt))
-        start = time.time()
 
-        if len(prompt) <= _MAX_ARG_LENGTH:
-            # Short prompt — pass directly via -p
-            cmd = [
-                self._gemini_bin,
-                "-p", prompt,
-                "-m", self.config.gemini_model,
-                "-o", "text",
-                "-y",
-            ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(self.config.target_project),
-                encoding="utf-8",
-                errors="replace",
-            )
-        else:
-            # Long prompt — write to temp file and pipe via stdin.
-            # This bypasses shell argument length limits.
-            prompt_file = self.config.forge_data_dir / "_temp_gemini_prompt.txt"
-            prompt_file.parent.mkdir(parents=True, exist_ok=True)
-            prompt_file.write_text(prompt, encoding="utf-8")
-
-            # Strategy 1: Try stdin piping (most CLIs support this)
-            cmd = [
-                self._gemini_bin,
-                "-m", self.config.gemini_model,
-                "-o", "text",
-                "-y",
-            ]
-            result = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(self.config.target_project),
-                encoding="utf-8",
-                errors="replace",
-            )
-
-            # Strategy 2: If stdin didn't work, try -p with file reference
-            if result.returncode != 0 and not result.stdout.strip():
-                logger.info("Gemini stdin piping failed, trying file reference")
-                short_prompt = (
-                    f"Read the file at {prompt_file} and follow the instructions inside it. "
-                    f"The file contains a full codebase analysis task."
-                )
+        while True:
+            start = time.time()
+            if len(prompt) <= _MAX_ARG_LENGTH:
+                # Short prompt — pass directly via -p
                 cmd = [
                     self._gemini_bin,
-                    "-p", short_prompt,
+                    "-p", prompt,
                     "-m", self.config.gemini_model,
                     "-o", "text",
                     "-y",
@@ -120,16 +73,67 @@ class Runner:
                     encoding="utf-8",
                     errors="replace",
                 )
+            else:
+                # Long prompt — write to temp file and pipe via stdin.
+                # This bypasses shell argument length limits.
+                prompt_file = self.config.forge_data_dir / "_temp_gemini_prompt.txt"
+                prompt_file.parent.mkdir(parents=True, exist_ok=True)
+                prompt_file.write_text(prompt, encoding="utf-8")
 
-        elapsed = time.time() - start
-        logger.info("Gemini CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
+                # Strategy 1: Try stdin piping (most CLIs support this)
+                cmd = [
+                    self._gemini_bin,
+                    "-m", self.config.gemini_model,
+                    "-o", "text",
+                    "-y",
+                ]
+                result = subprocess.run(
+                    cmd,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=str(self.config.target_project),
+                    encoding="utf-8",
+                    errors="replace",
+                )
 
-        if result.returncode != 0:
-            raise RunnerError(
-                f"Gemini CLI failed (exit {result.returncode}): {result.stderr[:500]}",
-                stdout=result.stdout,
-                stderr=result.stderr,
-            )
+                # Strategy 2: If stdin didn't work, try -p with file reference
+                if result.returncode != 0 and not result.stdout.strip():
+                    logger.info("Gemini stdin piping failed, trying file reference")
+                    short_prompt = (
+                        f"Read the file at {prompt_file} and follow the instructions inside it. "
+                        f"The file contains a full codebase analysis task."
+                    )
+                    cmd = [
+                        self._gemini_bin,
+                        "-p", short_prompt,
+                        "-m", self.config.gemini_model,
+                        "-o", "text",
+                        "-y",
+                    ]
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=str(self.config.target_project),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+
+            elapsed = time.time() - start
+            logger.info("Gemini CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
+
+            if result.returncode != 0:
+                logger.error(
+                    "Gemini CLI failed (exit %d): %s. Retrying in 60 seconds...",
+                    result.returncode, result.stderr[:500]
+                )
+                time.sleep(60)
+                continue
+            
+            break
 
         return result.stdout
 
@@ -171,32 +175,36 @@ class Runner:
             "--verbose",
         ]
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(self.config.target_project),
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        elapsed = time.time() - start
-        logger.info("Claude CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
-
-        if result.returncode != 0:
-            # Claude CLI might return non-zero but still have useful output.
-            # Only raise if there's no stdout at all.
-            if not result.stdout.strip():
-                raise RunnerError(
-                    f"Claude CLI failed (exit {result.returncode}): {result.stderr[:500]}",
-                    stdout=result.stdout,
-                    stderr=result.stderr,
-                )
-            logger.warning(
-                "Claude CLI returned non-zero (%d) but produced output — using it",
-                result.returncode,
+        while True:
+            start = time.time()
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(self.config.target_project),
+                encoding="utf-8",
+                errors="replace",
             )
+
+            elapsed = time.time() - start
+            logger.info("Claude CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
+
+            if result.returncode != 0:
+                # Claude CLI might return non-zero but still have useful output.
+                # Only raise if there's no stdout at all.
+                if not result.stdout.strip():
+                    logger.error(
+                        "Claude CLI failed (exit %d): %s. Retrying in 60 seconds...",
+                        result.returncode, result.stderr[:500]
+                    )
+                    time.sleep(60)
+                    continue
+                logger.warning(
+                    "Claude CLI returned non-zero (%d) but produced output — using it",
+                    result.returncode,
+                )
+            break
 
         return result.stdout
 
@@ -235,11 +243,19 @@ class Runner:
         if system:
             config_kwargs["system_instruction"] = system
 
-        response = self._deep_think_client.models.generate_content(
-            model=self.config.deep_think_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(**config_kwargs),
-        )
+        while True:
+            try:
+                response = self._deep_think_client.models.generate_content(
+                    model=self.config.deep_think_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+                break
+            except Exception as e:
+                logger.error("Deep Think failed: %s. Retrying in 10 minutes (600s)...", e)
+                time.sleep(600)
+                # Reset start time for accurate elapsed calculation of the successful run
+                start = time.time()
 
         elapsed = time.time() - start
 
