@@ -111,8 +111,7 @@ class ForgeConfig:
                 if p.exists():
                     return str(p)
         raise FileNotFoundError(
-            "Gemini CLI not found. Install it or set gemini_cli_path in config.
-"
+            "Gemini CLI not found. Install it or set gemini_cli_path in config.\n"
             "  npm install -g @anthropic-ai/gemini-code  (or your package manager)"
         )
 
@@ -142,8 +141,7 @@ class ForgeConfig:
                 if p.exists():
                     return str(p)
         raise FileNotFoundError(
-            "Claude Code CLI not found. Install it or set claude_cli_path in config.
-"
+            "Claude Code CLI not found. Install it or set claude_cli_path in config.\n"
             "  npm install -g @anthropic-ai/claude-code  (or your package manager)"
         )
 
@@ -152,8 +150,7 @@ class ForgeConfig:
         issues = []
         if not self.google_api_key:
             issues.append(
-                "google_api_key is not set. Deep Think stage will fail.
-"
+                "google_api_key is not set. Deep Think stage will fail.\n"
                 "  Set GOOGLE_API_KEY env var or edit forge/config.py"
             )
         if not self.target_project.is_dir():

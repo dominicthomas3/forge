@@ -176,8 +176,7 @@ def _run_benchmarks(config: ForgeConfig) -> str:
             cwd=str(target),
         )
         if proc.returncode == 0:
-            all_deps = [l for l in proc.stdout.strip().split("
-") if l.strip()]
+            all_deps = [l for l in proc.stdout.strip().split("\\n") if l.strip()]
             lc_deps = [l for l in all_deps if "langchain" in l.lower() or "langgraph" in l.lower()]
             results.append(f"  - Total packages: {len(all_deps)}")
             results.append(f"  - LangChain/LangGraph packages: {len(lc_deps)}")
@@ -242,8 +241,7 @@ def _run_benchmarks(config: ForgeConfig) -> str:
     except Exception as e:
         results.append(f"  - ERROR: {e}")
 
-    return "
-".join(results)
+    return "\\n".join(results)
 
 
 def _run_structural_tests(config: ForgeConfig) -> str:
@@ -284,8 +282,7 @@ def _run_structural_tests(config: ForgeConfig) -> str:
         results.append(f"PASS — {len(py_files)} files checked, all valid")
 
     # 2. Pytest (if tests/ directory exists)
-    results.append("
-### Pytest Suite")
+    results.append("\\n### Pytest Suite")
     tests_dir = target / "tests"
     if tests_dir.is_dir():
         try:
@@ -308,8 +305,7 @@ def _run_structural_tests(config: ForgeConfig) -> str:
     else:
         results.append("SKIP — no tests/ directory found")
 
-    return "
-".join(results)
+    return "\\n".join(results)
 
 
 def run(
@@ -328,44 +324,36 @@ def run(
     changes_parts = []
     if implementation_path.exists():
         changes_parts.append(
-            "## Implementation Changes (Stage 3):
-"
+            "## Implementation Changes (Stage 3):\\n"
             + implementation_path.read_text(encoding="utf-8")
         )
     if fixes_path and fixes_path.exists():
         changes_parts.append(
-            "## Consensus Fixes (Stage 6):
-"
+            "## Consensus Fixes (Stage 6):\\n"
             + fixes_path.read_text(encoding="utf-8")
         )
-    changes_summary = "
-
-".join(changes_parts) or "No changes recorded."
+    changes_summary = "\\n\\n".join(changes_parts) or "No changes recorded."
 
     results_parts: list[str] = []
 
     # ── Pass 1: Structural tests (automated, free) ────────────────────
     logger.info("Stress test pass 1: Structural tests (automated)")
     structural_results = _run_structural_tests(config)
-    results_parts.append("# PASS 1: STRUCTURAL TESTS (automated)
-" + structural_results)
+    results_parts.append("# PASS 1: STRUCTURAL TESTS (automated)\\n" + structural_results)
 
     # ── Pass 2: Performance benchmarks (automated, free) ──────────────
     logger.info("Stress test pass 2: Performance benchmarks (automated)")
     benchmark_results = _run_benchmarks(config)
-    results_parts.append("# PASS 2: PERFORMANCE BENCHMARKS (automated)
-" + benchmark_results)
+    results_parts.append("# PASS 2: PERFORMANCE BENCHMARKS (automated)\\n" + benchmark_results)
 
     # ── Pass 3: Claude functional tests (LLM-driven) ─────────────────
     logger.info("Stress test pass 3: Claude functional tests")
     claude_prompt = _CLAUDE_STRESS_PROMPT.format(changes_summary=changes_summary)
     try:
         claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout)
-        results_parts.append("# PASS 3: CLAUDE FUNCTIONAL TESTS
-" + claude_results)
+        results_parts.append("# PASS 3: CLAUDE FUNCTIONAL TESTS\\n" + claude_results)
     except Exception as e:
-        results_parts.append(f"# PASS 3: CLAUDE FUNCTIONAL TESTS
-ERROR: {e}")
+        results_parts.append(f"# PASS 3: CLAUDE FUNCTIONAL TESTS\\nERROR: {e}")
 
     # ── Pass 4: Jim regression scan (full codebase) ───────────────────
     logger.info("Stress test pass 4: Jim regression scan")
@@ -376,18 +364,12 @@ ERROR: {e}")
     )
     try:
         jim_results = runner.run_gemini(jim_prompt)
-        results_parts.append("# PASS 4: JIM REGRESSION SCAN
-" + jim_results)
+        results_parts.append("# PASS 4: JIM REGRESSION SCAN\\n" + jim_results)
     except Exception as e:
-        results_parts.append(f"# PASS 4: JIM REGRESSION SCAN
-ERROR: {e}")
+        results_parts.append(f"# PASS 4: JIM REGRESSION SCAN\\nERROR: {e}")
 
     # ── Compile final report ──────────────────────────────────────────
-    full_report = ("
-
-" + "=" * 80 + "
-
-").join(results_parts)
+    full_report = ("\\n\\n" + "=" * 80 + "\\n\\n").join(results_parts)
     output_path.write_text(full_report, encoding="utf-8")
     logger.info("Stress test report saved: %s (%d chars)", output_path, len(full_report))
 

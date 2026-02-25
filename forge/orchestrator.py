@@ -255,8 +255,7 @@ class Orchestrator:
             if result["stress_verdict"] != "PASS":
                 remaining.append(f"Stress test verdict: {result['stress_verdict']}")
                 remaining.append(stress_content[:3000])
-            result["remaining_issues"] = "
-".join(remaining) if remaining else ""
+            result["remaining_issues"] = "\\n".join(remaining) if remaining else ""
 
         except RunnerError as e:
             error_msg = f"Stage failed: {e}"
@@ -374,7 +373,7 @@ class Orchestrator:
             status = "STOPPED (limits reached)"
 
         lines = [
-            f"# Forge Overnight Report",
+            "# Forge Overnight Report",
             f"## {datetime.now().strftime('%B %d, %Y — %I:%M %p')}",
             "",
             f"**Status:** {status}",
@@ -440,9 +439,7 @@ class Orchestrator:
                 content = sf.read_text(encoding="utf-8", errors="replace")
                 # Truncate for readability
                 if len(content) > 3000:
-                    content = content[:3000] + "
-
-... (truncated — see full file)"
+                    content = content[:3000] + "\\n\\n... (truncated — see full file)"
                 lines.append(content)
                 lines.append("")
 
@@ -456,7 +453,6 @@ class Orchestrator:
             lines.append("git checkout <commit-hash>  # roll back to any checkpoint")
         lines.append("```")
 
-        report = "
-".join(lines)
+        report = "\\n".join(lines)
         report_path.write_text(report, encoding="utf-8")
         return report_path
