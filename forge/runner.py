@@ -160,32 +160,34 @@ class Runner:
         start = time.time()
 
         # Claude Code CLI always uses -p for the prompt.
-        # For very long prompts, write to file and reference it.
+        # For very long prompts, write to file and pipe via stdin.
         if len(prompt) <= _MAX_ARG_LENGTH:
-            actual_prompt = prompt
+            cmd = [
+                self._claude_bin,
+                "-p", prompt,
+                "--output-format", "text",
+                "--model", self.config.claude_model,
+                "--dangerously-skip-permissions",
+                "--verbose",
+            ]
+            stdin_data = None
         else:
-            prompt_file = self.config.forge_data_dir / "_temp_claude_prompt.txt"
-            prompt_file.parent.mkdir(parents=True, exist_ok=True)
-            prompt_file.write_text(prompt, encoding="utf-8")
-            actual_prompt = (
-                f"Read the instruction file at {prompt_file} and execute all tasks described in it. "
-                f"The file contains your full implementation instructions."
-            )
-
-        cmd = [
-            self._claude_bin,
-            "-p", actual_prompt,
-            "--output-format", "text",
-            "--model", self.config.claude_model,
-            "--dangerously-skip-permissions",
-            "--verbose",
-        ]
+            cmd = [
+                self._claude_bin,
+                "--print",
+                "--output-format", "text",
+                "--model", self.config.claude_model,
+                "--dangerously-skip-permissions",
+                "--verbose",
+            ]
+            stdin_data = prompt
 
         while True:
             start = time.time()
             try:
                 result = subprocess.run(
                     cmd,
+                    input=stdin_data,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
