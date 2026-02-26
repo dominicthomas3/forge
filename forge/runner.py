@@ -157,8 +157,12 @@ class Runner:
             self._claude_bin = self.config.resolve_claude_cli()
 
         logger.info("Running Claude Code CLI — %d chars prompt", len(prompt))
-        start = time.time()
 
+        # We pass the prompt as an argument because Claude Code CLI with --print 
+        # often requires it as a positional argument on Windows to work correctly 
+        # with stdout capturing.
+        
+        # Base command
         cmd = [
             self._claude_bin,
             "--print",
@@ -167,32 +171,65 @@ class Runner:
             "--dangerously-skip-permissions",
             "--verbose",
         ]
-        stdin_data = prompt
 
         while True:
             start = time.time()
             try:
-                result = subprocess.run(
-                    cmd,
-                    input=stdin_data,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=str(self.config.target_project),
-                    encoding="utf-8",
-                    errors="replace",
-                )
+                if len(prompt) <= _MAX_ARG_LENGTH:
+                    # Short prompt — pass as argument
+                    current_cmd = cmd + [prompt]
+                    result = subprocess.run(
+                        current_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=str(self.config.target_project),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                else:
+                    # Long prompt — try piping first
+                    result = subprocess.run(
+                        cmd,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=str(self.config.target_project),
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    
+                    # If piping failed because of the "Input must be provided" error,
+                    # we have a problem with very long prompts on Windows.
+                    if result.returncode != 0 and "Input must be provided" in result.stderr:
+                        logger.warning("Claude stdin piping failed, trying to pass via temp file reference")
+                        prompt_file = self.config.forge_data_dir / "_temp_claude_prompt.txt"
+                        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+                        prompt_file.write_text(prompt, encoding="utf-8")
+                        
+                        file_prompt = f"Please read the instructions in {prompt_file} and execute them."
+                        current_cmd = cmd + [file_prompt]
+                        result = subprocess.run(
+                            current_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout,
+                            cwd=str(self.config.target_project),
+                            encoding="utf-8",
+                            errors="replace",
+                        )
 
                 elapsed = time.time() - start
                 logger.info("Claude CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
 
                 if result.returncode != 0:
                     # Claude CLI might return non-zero but still have useful output.
-                    # Only raise if there's no stdout at all.
+                    # Only retry if it looks like a fatal error (no stdout).
                     if not result.stdout.strip():
                         logger.error(
                             "Claude CLI failed (exit %d): %s. Retrying in 60 seconds...",
-                            result.returncode, result.stderr[:500]
+                            result.returncode, (result.stderr or result.stdout)[:500]
                         )
                         time.sleep(60)
                         continue
