@@ -53,7 +53,10 @@ class Runner:
 
         logger.info("Running Gemini CLI (Jim) — %d chars prompt", len(prompt))
 
-        while True:
+        max_retries = 3
+        retry_count = 0
+
+        while retry_count < max_retries:
             start = time.time()
             try:
                 if len(prompt) <= _MAX_ARG_LENGTH:
@@ -75,13 +78,7 @@ class Runner:
                         errors="replace",
                     )
                 else:
-                    # Long prompt — write to temp file and pipe via stdin.
-                    # This bypasses shell argument length limits.
-                    prompt_file = self.config.forge_data_dir / "_temp_gemini_prompt.txt"
-                    prompt_file.parent.mkdir(parents=True, exist_ok=True)
-                    prompt_file.write_text(prompt, encoding="utf-8")
-
-                    # Strategy 1: Try stdin piping (most CLIs support this)
+                    # Long prompt — pipe via stdin.
                     cmd = [
                         self._gemini_bin,
                         "-m", self.config.gemini_model,
@@ -99,49 +96,41 @@ class Runner:
                         errors="replace",
                     )
 
-                    # Strategy 2: If stdin didn't work, try -p with file reference
-                    if result.returncode != 0 and not result.stdout.strip():
-                        logger.info("Gemini stdin piping failed, trying file reference")
-                        short_prompt = (
-                            f"Read the file at {prompt_file} and follow the instructions inside it. "
-                            f"The file contains a full codebase analysis task."
-                        )
-                        cmd = [
-                            self._gemini_bin,
-                            "-p", short_prompt,
-                            "-m", self.config.gemini_model,
-                            "-o", "text",
-                            "-y",
-                        ]
-                        result = subprocess.run(
-                            cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=timeout,
-                            cwd=str(self.config.target_project),
-                            encoding="utf-8",
-                            errors="replace",
-                        )
-
                 elapsed = time.time() - start
-                logger.info("Gemini CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
-
-                if result.returncode != 0:
-                    logger.error(
-                        "Gemini CLI failed (exit %d): %s. Retrying in 60 seconds...",
-                        result.returncode, result.stderr[:500]
-                    )
-                    time.sleep(60)
+                
+                # Check for 429 or other specific failure strings in output
+                output = result.stdout.strip()
+                error_output = result.stderr.strip()
+                
+                is_429 = "RESOURCE_EXHAUSTED" in error_output or "429" in error_output or "No capacity available" in error_output
+                
+                if result.returncode != 0 or is_429 or len(output) < 100:
+                    retry_count += 1
+                    wait_time = 120 if is_429 else 60
+                    
+                    error_msg = f"Gemini CLI failed (exit {result.returncode})"
+                    if is_429:
+                        error_msg = "Gemini CLI hit RATE LIMIT (429 Resource Exhausted)"
+                    elif len(output) < 100 and result.returncode == 0:
+                        error_msg = f"Gemini CLI returned suspiciously short output ({len(output)} chars)"
+                    
+                    logger.error("%s. Retry %d/%d in %ds...", error_msg, retry_count, max_retries, wait_time)
+                    if error_output:
+                        logger.debug("Gemini Stderr: %s", error_output[:500])
+                        
+                    time.sleep(wait_time)
                     continue
                 
-                break
+                logger.info("Gemini CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
+                return output
 
             except subprocess.TimeoutExpired:
-                logger.error("Gemini CLI timed out after %d seconds. Retrying in 60 seconds...", timeout)
+                retry_count += 1
+                logger.error("Gemini CLI timed out after %d seconds. Retry %d/%d...", timeout, retry_count, max_retries)
                 time.sleep(60)
                 continue
 
-        return result.stdout
+        raise RunnerError(f"Gemini CLI failed after {max_retries} retries.")
 
     # ── Claude Code CLI ───────────────────────────────────────────────────
 
