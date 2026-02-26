@@ -1,15 +1,19 @@
 """Stage 7: Stress Testing — Rigorous multi-angle testing of the target project.
 
-This isn't "run pytest and call it a day." This is four independent
+This isn't "run pytest and call it a day." This is five independent
 testing passes:
 
 1. STRUCTURAL TESTS (automated) — Syntax, imports, dependencies
 2. PERFORMANCE BENCHMARKS (automated) — Latency, import time, memory, dependency count
 3. CLAUDE FUNCTIONAL TESTS — Claude uses the project, tests flows, evaluates quality
 4. JIM REGRESSION SCAN — Gemini scans the full codebase for anything broken
+5. TOKEN AUDIT (automated) — Validates caching works, detects token bloat, verifies
+   prompt efficiency. This is critical: if the middleware replacement silently drops
+   cache_control headers or inflates prompts, this pass catches it before convergence.
 
 The project doesn't just need to compile. It needs to WORK. And it needs
-to work BETTER than before — benchmarks prove it.
+to work BETTER than before — benchmarks prove it. And it must NOT regress
+on token efficiency.
 """
 
 from __future__ import annotations
@@ -121,6 +125,253 @@ if the codebase looks clean.
 CURRENT CODEBASE:
 {codebase}
 """
+
+
+_CLAUDE_TOKEN_AUDIT_PROMPT = """
+You are the Token Efficiency Auditor in the Forge pipeline. Your job is to
+verify that the middleware replacement has NOT introduced token bloat, cache
+leaks, or prompt inflation.
+
+This is CRITICAL. The owner spent a week fixing 3x token overconsumption.
+Any regression here is an automatic FAIL.
+
+CHANGES MADE THIS CYCLE:
+{changes_summary}
+
+YOUR TASK — AUDIT TOKEN EFFICIENCY:
+
+## AUDIT 1: CACHE HEADER VERIFICATION
+Inspect every file in models/ that makes API calls. Verify:
+- Anthropic calls include `cache_control` blocks on system messages
+- The cache_control format matches Anthropic's spec: {{"type": "ephemeral"}}
+- Tool definitions include cache_control on the last tool (for tool caching)
+- If ANY cache_control logic was removed or broken, this is a FAIL.
+
+Report: Which files have cache_control? Is it correctly formatted? Any gaps?
+
+## AUDIT 2: PROMPT ASSEMBLY BLOAT CHECK
+Read core/prompt_assembler.py. Verify:
+- Token budget is still enforced (16k for Opus/Sonnet/Pro, 3k for Flash)
+- Priority ordering is preserved (personality > facts > tools > summary > window > recall)
+- No new system instructions or hidden text was injected by the replacement
+- The assembled prompt is NOT larger than before the changes
+
+Report: What is the token budget? Are priorities intact? Any new text injected?
+
+## AUDIT 3: MESSAGE FORMAT EFFICIENCY
+Check how messages are built before API calls. Verify:
+- Messages are minimal — no extra metadata, no framework wrappers left behind
+- Tool results are sent as concise strings, not bloated objects
+- No duplicate messages in the conversation history
+- System prompt is sent ONCE, not repeated per message
+
+Report: Are messages lean? Any redundancy? Any wrapper artifacts?
+
+## AUDIT 4: FLASH DAEMON SCOPE CHECK
+Gemini Flash handles cheap background work (memory summarization, context
+compilation, journal entries). Verify:
+- Flash is NEVER used for user-facing conversations
+- Flash calls have max_output_tokens capped (should be ~80)
+- Flash is not accidentally getting full prompt assemblies meant for Opus/Sonnet
+
+Report: Is Flash scoped correctly? Any scope creep?
+
+## AUDIT 5: TOKEN TRACKING INTEGRITY
+Check models/token_tracker.py and cost calculation in model adapters. Verify:
+- Input tokens, output tokens, cached tokens are all tracked correctly
+- Cost calculation uses the right pricing per model
+- cache_read_input_tokens and cache_creation_input_tokens are captured (Anthropic)
+- No token counts are being silently dropped or zeroed
+
+Report: Is tracking complete? Any missing metrics?
+
+## AUDIT 6: UNNECESSARY LLM CALLS
+Scan the full pipeline flow. Check for:
+- Any place where an LLM is called when a local operation would suffice
+- Router using an LLM call (should be pure keyword matching, zero tokens)
+- Memory operations making redundant LLM calls
+- Any retry logic that resubmits the full prompt on transient errors (should retry the same call, not rebuild)
+
+Report: Any unnecessary LLM invocations found?
+
+OUTPUT FORMAT:
+
+## TOKEN AUDIT RESULTS
+
+| Audit | Status | Details |
+|-------|--------|---------|
+| Cache Headers | PASS/FAIL | ... |
+| Prompt Bloat | PASS/FAIL | ... |
+| Message Efficiency | PASS/FAIL | ... |
+| Flash Scope | PASS/FAIL | ... |
+| Token Tracking | PASS/FAIL | ... |
+| Unnecessary Calls | PASS/FAIL | ... |
+
+## TOKEN EFFICIENCY VERDICT
+[PASS — token efficiency preserved or improved / FAIL — token regression detected]
+
+## ISSUES FOUND
+[Detailed description of any token efficiency problems]
+"""
+
+
+def _run_token_audit(config: ForgeConfig) -> str:
+    """Run automated token audit checks (no LLM cost).
+
+    Validates that caching infrastructure, prompt budgets, and token
+    tracking are intact after middleware changes. These are the checks
+    that catch silent cache leaks and prompt bloat.
+    """
+    results: list[str] = []
+    target = config.target_project
+
+    results.append("### Automated Token Audit Checks")
+    results.append("")
+
+    # 1. Cache control presence in model adapters
+    results.append("**Cache Control Presence**")
+    cache_files_checked = 0
+    cache_issues = []
+
+    for model_file in sorted((target / "models").glob("*.py")):
+        if model_file.name.startswith("__"):
+            continue
+        cache_files_checked += 1
+        content = model_file.read_text(encoding="utf-8", errors="ignore")
+
+        # Check for cache_control in Claude adapters
+        if "claude" in model_file.name.lower() or "anthropic" in content.lower():
+            if "cache_control" not in content:
+                cache_issues.append(
+                    f"  - {model_file.name}: Claude adapter MISSING cache_control"
+                )
+            else:
+                results.append(f"  - {model_file.name}: cache_control PRESENT")
+
+    if cache_issues:
+        results.extend(cache_issues)
+        results.append("  *** FAIL: Cache control missing from Claude adapters ***")
+    else:
+        results.append(f"  - Checked {cache_files_checked} model files — all Claude adapters have cache_control")
+
+    # 2. Prompt budget enforcement
+    results.append("")
+    results.append("**Prompt Token Budget**")
+    assembler_path = target / "core" / "prompt_assembler.py"
+    if assembler_path.exists():
+        asm_content = assembler_path.read_text(encoding="utf-8", errors="ignore")
+        # Look for budget constants
+        budget_found = False
+        for marker in ["16000", "16_000", "token_budget", "max_tokens", "budget"]:
+            if marker in asm_content.lower():
+                budget_found = True
+                break
+        if budget_found:
+            results.append("  - Token budget enforcement: PRESENT")
+        else:
+            results.append("  - Token budget enforcement: NOT FOUND — possible bloat risk")
+
+        # Check priority ordering
+        if "priority" in asm_content.lower() or "personality" in asm_content.lower():
+            results.append("  - Priority-based assembly: PRESENT")
+        else:
+            results.append("  - Priority-based assembly: NOT FOUND — check prompt_assembler")
+    else:
+        results.append("  - WARNING: prompt_assembler.py not found")
+
+    # 3. Flash scope check
+    results.append("")
+    results.append("**Gemini Flash Scope Check**")
+    flash_issues = []
+    for flash_file in (target / "models").glob("*flash*"):
+        content = flash_file.read_text(encoding="utf-8", errors="ignore")
+        # Check max output tokens is capped low
+        if "max_output_tokens" in content:
+            import re
+            matches = re.findall(r"max_output_tokens\s*[=:]\s*(\d+)", content)
+            for val in matches:
+                if int(val) > 200:
+                    flash_issues.append(
+                        f"  - {flash_file.name}: max_output_tokens={val} (should be <=200 for daemon)"
+                    )
+                else:
+                    results.append(f"  - {flash_file.name}: max_output_tokens={val} — correctly capped")
+        # Check tools are disabled
+        if "tools" in content.lower():
+            # Check if tools are explicitly disabled or absent
+            if "no tools" in content.lower() or "tools=none" in content.lower() or "tools=[]" in content.lower():
+                results.append(f"  - {flash_file.name}: tools correctly disabled")
+            elif "get_tools" in content and "[]" not in content:
+                flash_issues.append(
+                    f"  - {flash_file.name}: may have tools enabled (should be daemon-only, no tools)"
+                )
+
+    if flash_issues:
+        results.extend(flash_issues)
+    elif not list((target / "models").glob("*flash*")):
+        results.append("  - No flash model file found")
+
+    # 4. Token tracker completeness
+    results.append("")
+    results.append("**Token Tracker Completeness**")
+    tracker_path = target / "models" / "token_tracker.py"
+    if tracker_path.exists():
+        tracker_content = tracker_path.read_text(encoding="utf-8", errors="ignore")
+        tracked_metrics = []
+        for metric in ["input_tokens", "output_tokens", "cached_tokens", "cache_read", "cache_creation", "cost"]:
+            if metric in tracker_content:
+                tracked_metrics.append(metric)
+        results.append(f"  - Tracked metrics: {', '.join(tracked_metrics)}")
+        if "input_tokens" in tracked_metrics and "output_tokens" in tracked_metrics:
+            results.append("  - Core token tracking: PRESENT")
+        else:
+            results.append("  - Core token tracking: INCOMPLETE — missing input/output counts")
+        if "cached_tokens" in tracked_metrics or "cache_read" in tracked_metrics:
+            results.append("  - Cache metric tracking: PRESENT")
+        else:
+            results.append("  - Cache metric tracking: NOT FOUND — cache effectiveness invisible")
+    else:
+        results.append("  - WARNING: token_tracker.py not found")
+
+    # 5. No LLM in router check
+    results.append("")
+    results.append("**Router LLM-Free Check**")
+    router_path = target / "core" / "router.py"
+    if router_path.exists():
+        router_content = router_path.read_text(encoding="utf-8", errors="ignore")
+        llm_markers = ["invoke", "generate", "astream", "completion", "chat("]
+        router_llm_calls = [m for m in llm_markers if m in router_content]
+        if router_llm_calls:
+            results.append(f"  - WARNING: Router contains LLM-like calls: {router_llm_calls}")
+            results.append("  - Router should be pure keyword matching (zero tokens)")
+        else:
+            results.append("  - Router is LLM-free: PASS (pure keyword matching)")
+
+    # 6. LangChain message wrapper check (should be gone after replacement)
+    results.append("")
+    results.append("**Message Wrapper Bloat Check**")
+    bloat_markers = ["HumanMessage", "AIMessage", "SystemMessage", "ToolMessage"]
+    files_with_wrappers = []
+    for py_file in sorted(target.rglob("*.py")):
+        if any(excl in py_file.parts for excl in ("__pycache__", ".venv", "node_modules", "tests")):
+            continue
+        try:
+            content = py_file.read_text(encoding="utf-8", errors="ignore")
+            found = [m for m in bloat_markers if m in content]
+            if found:
+                files_with_wrappers.append((py_file.relative_to(target), found))
+        except Exception:
+            pass
+
+    if files_with_wrappers:
+        results.append(f"  - {len(files_with_wrappers)} files still using LangChain message wrappers:")
+        for fpath, markers in files_with_wrappers[:10]:
+            results.append(f"    - {fpath}: {', '.join(markers)}")
+        results.append("  - NOTE: These add serialization overhead per message")
+    else:
+        results.append("  - No LangChain message wrappers found — messages are lean")
+
+    return "\\n".join(results)
 
 
 def _run_benchmarks(config: ForgeConfig) -> str:
@@ -259,8 +510,18 @@ def _run_structural_tests(config: ForgeConfig) -> str:
     syntax_errors = []
     for py_file in py_files:
         try:
+            # Use in-memory compile() instead of py_compile to avoid
+            # __pycache__ disk writes. On Windows, sequential py_compile
+            # subprocesses deadlock when Defender locks __pycache__ between
+            # writes. compile() validates syntax identically (py_compile
+            # calls it internally) without any disk I/O.
             proc = subprocess.run(
-                ["python", "-m", "py_compile", str(py_file)],
+                [
+                    "python", "-c",
+                    "import tokenize,sys;f=tokenize.open(sys.argv[1]);"
+                    "compile(f.read(),sys.argv[1],'exec')",
+                    str(py_file),
+                ],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -350,7 +611,7 @@ def run(
     logger.info("Stress test pass 3: Claude functional tests")
     claude_prompt = _CLAUDE_STRESS_PROMPT.format(changes_summary=changes_summary)
     try:
-        claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout)
+        claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout, needs_filesystem=False)
         results_parts.append("# PASS 3: CLAUDE FUNCTIONAL TESTS\\n" + claude_results)
     except Exception as e:
         results_parts.append(f"# PASS 3: CLAUDE FUNCTIONAL TESTS\\nERROR: {e}")
@@ -367,6 +628,30 @@ def run(
         results_parts.append("# PASS 4: JIM REGRESSION SCAN\\n" + jim_results)
     except Exception as e:
         results_parts.append(f"# PASS 4: JIM REGRESSION SCAN\\nERROR: {e}")
+
+    # ── Pass 5: Token audit (automated + LLM-driven) ────────────────
+    logger.info("Stress test pass 5: Token efficiency audit")
+
+    # 5a. Automated token checks (free, no LLM cost)
+    automated_token_results = _run_token_audit(config)
+
+    # 5b. Claude deep token audit (LLM-driven, inspects actual code logic)
+    claude_token_prompt = _CLAUDE_TOKEN_AUDIT_PROMPT.format(
+        changes_summary=changes_summary,
+    )
+    try:
+        claude_token_results = runner.run_claude(
+            claude_token_prompt, timeout=config.stress_timeout, needs_filesystem=False
+        )
+    except Exception as e:
+        claude_token_results = f"ERROR: {e}"
+
+    token_audit_report = (
+        automated_token_results
+        + "\\n\\n---\\n\\n### Claude Token Audit (LLM-driven)\\n"
+        + claude_token_results
+    )
+    results_parts.append("# PASS 5: TOKEN EFFICIENCY AUDIT\\n" + token_audit_report)
 
     # ── Compile final report ──────────────────────────────────────────
     full_report = ("\\n\\n" + "=" * 80 + "\\n\\n").join(results_parts)
