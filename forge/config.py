@@ -50,9 +50,9 @@ class ForgeConfig:
     stress_test_rounds: int = 10  # Beat on the project repeatedly
 
     # ─── TIMEOUTS (seconds) ───────────────────────────────────────────────
-    gemini_timeout: int = 900     # 15 min for full codebase analysis
+    gemini_timeout: int = 1000    # ~16 min — generous for Gemini processing
     deep_think_timeout: int = 900  # 15 min for extended reasoning
-    claude_timeout: int = 2700    # 45 min for complex multi-file implementation
+    claude_timeout: int = 1800    # 30 min — Lamborghini Phase 2 creates 6+ new files per cycle
     stress_timeout: int = 900     # 15 min for stress testing
 
     # ─── GIT ──────────────────────────────────────────────────────────────

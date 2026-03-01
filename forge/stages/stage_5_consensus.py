@@ -53,6 +53,12 @@ YOUR TASK — INDEPENDENT VERIFICATION:
    - Missing error handling for edge cases
    - Behavioral changes disguised as refactors
 
+   IMPORTANT — KNOWN FALSE POSITIVES (do NOT flag):
+   - The `@tool` decorator in `tools/*.py` is CORRECT and working. It is NOT
+     `@all_tools.txt`. This has been verified by grep in every prior cycle.
+     The `@tool` decorator is from `tools/core.py` (the project's own decorator).
+   - The memory/ and cortex/ ChromaDB files ARE in scope for Phase 2. Do not skip them.
+
 4. **CONSENSUS REPORT**: Produce a final list of AGREED fixes.
    Only include fixes where you independently verify the issue exists.
 

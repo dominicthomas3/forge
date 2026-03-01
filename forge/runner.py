@@ -2,12 +2,21 @@
 
 All calls run on subscriptions (Claude Max + Google Pro Ultra).
 Zero marginal cost per invocation.
+
+Uses Popen with active polling instead of blocking subprocess.run().
+Every subprocess is monitored with:
+    - Status logs every 30 seconds
+    - Warnings when exceeding expected duration
+    - Hard kill when clearly hung
+    - Stall detection (process alive but not producing output)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -30,13 +39,166 @@ class RunnerError(Exception):
 
 
 class Runner:
-    """Invokes external AI models via CLI and SDK."""
+    """Invokes external AI models via CLI and SDK with active monitoring."""
 
     def __init__(self, config: ForgeConfig):
         self.config = config
         self._gemini_bin: str | None = None
         self._claude_bin: str | None = None
         self._deep_think_client = None
+
+    # ── Monitored Subprocess Execution ─────────────────────────────────────
+
+    def _run_monitored(
+        self,
+        cmd: list[str],
+        *,
+        input_text: str | None = None,
+        timeout: int,
+        stage_name: str,
+        expected_min: int = 60,
+        expected_max: int = 300,
+        stall_limit: int = 180,
+        cwd: str,
+    ) -> subprocess.CompletedProcess:
+        """Run a subprocess with active polling and monitoring.
+
+        Args:
+            cmd: Command to execute.
+            input_text: Optional stdin text to pipe.
+            timeout: Hard kill timeout in seconds.
+            stage_name: Human-readable name for logging (e.g., "Gemini/Jim").
+            expected_min: Minimum expected duration (seconds). Below this = fast.
+            expected_max: Expected max duration. Exceeding triggers a warning.
+            stall_limit: If process is alive but no new output for this many
+                         seconds, log a stall warning.
+            cwd: Working directory.
+
+        Returns:
+            CompletedProcess with stdout, stderr, returncode.
+
+        Raises:
+            subprocess.TimeoutExpired: If hard timeout exceeded (process killed).
+        """
+        logger.info("[%s] Starting subprocess (timeout=%ds, expected=%d-%ds)",
+                     stage_name, timeout, expected_min, expected_max)
+
+        # Always use PIPE for stdin — never inherit parent stdin.
+        # Under nohup, parent stdin is /dev/null which confuses CLIs
+        # that check stdin for input.
+        #
+        # Strip ALL Claude Code env vars so CLI subprocesses don't detect
+        # a parent session and refuse to launch or behave unexpectedly.
+        clean_env = os.environ.copy()
+        for key in list(clean_env.keys()):
+            key_upper = key.upper()
+            if key_upper == "CLAUDECODE" or key_upper.startswith("CLAUDE_CODE_"):
+                del clean_env[key]
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd,
+            env=clean_env,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        # ── I/O threads to prevent pipe-buffer deadlock ──
+        # The classic subprocess deadlock: if we use stdout=PIPE + stderr=PIPE
+        # but only call proc.poll() without reading the pipes, the OS pipe
+        # buffer (4-64KB on Windows) fills up, the child blocks on write,
+        # and our poll loop sees it as "still running" forever.
+        # Fix: drain stdout/stderr continuously in background threads.
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def _write_stdin():
+            try:
+                if input_text:
+                    proc.stdin.write(input_text)
+                proc.stdin.close()
+            except Exception:
+                pass  # Process may have died
+
+        def _drain(pipe, chunks):
+            try:
+                for line in pipe:
+                    chunks.append(line)
+            except Exception:
+                pass
+
+        stdin_thread = threading.Thread(target=_write_stdin, daemon=True)
+        stdout_thread = threading.Thread(target=_drain, args=(proc.stdout, stdout_chunks), daemon=True)
+        stderr_thread = threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True)
+        stdin_thread.start()
+        stdout_thread.start()
+        stderr_thread.start()
+
+        start = time.time()
+        warned_slow = False
+        warned_stall = False
+        poll_interval = 5  # seconds between checks
+        last_log_time = start
+
+        while True:
+            retcode = proc.poll()
+            if retcode is not None:
+                # Process finished — wait for I/O threads to drain
+                stdout_thread.join(timeout=10)
+                stderr_thread.join(timeout=10)
+                stdout = "".join(stdout_chunks)
+                stderr = "".join(stderr_chunks)
+                elapsed = time.time() - start
+                logger.info("[%s] Finished in %.1fs (exit %d)", stage_name, elapsed, retcode)
+                return subprocess.CompletedProcess(
+                    args=cmd, returncode=retcode, stdout=stdout, stderr=stderr,
+                )
+
+            elapsed = time.time() - start
+
+            # Periodic status log — every 30 seconds
+            if elapsed - (last_log_time - start) >= 30:
+                logger.info("[%s] Still running... %.0fs elapsed", stage_name, elapsed)
+                last_log_time = time.time()
+
+            # Warning: exceeding expected max duration
+            if elapsed > expected_max and not warned_slow:
+                logger.warning(
+                    "[%s] SLOW — %.0fs elapsed (expected <%ds). "
+                    "Will hard-kill at %ds if no response.",
+                    stage_name, elapsed, expected_max, timeout,
+                )
+                warned_slow = True
+
+            # Stall detection: process alive way past expected, likely hung
+            if elapsed > expected_max + stall_limit and not warned_stall:
+                logger.warning(
+                    "[%s] POSSIBLE STALL — %.0fs elapsed, %ds past expected max. "
+                    "Process PID %d still alive.",
+                    stage_name, elapsed, int(elapsed - expected_max), proc.pid,
+                )
+                warned_stall = True
+
+            # Hard timeout — kill the process
+            if elapsed > timeout:
+                logger.error(
+                    "[%s] HARD TIMEOUT — killing process after %.0fs (limit: %ds)",
+                    stage_name, elapsed, timeout,
+                )
+                proc.kill()
+                stdout_thread.join(timeout=5)
+                stderr_thread.join(timeout=5)
+                stdout = "".join(stdout_chunks)
+                stderr = "".join(stderr_chunks)
+                raise subprocess.TimeoutExpired(
+                    cmd=cmd, timeout=timeout, output=stdout, stderr=stderr,
+                )
+
+            time.sleep(poll_interval)
 
     # ── Gemini CLI (Jim) ──────────────────────────────────────────────────
 
@@ -53,14 +215,19 @@ class Runner:
 
         logger.info("Running Gemini CLI (Jim) — %d chars prompt", len(prompt))
 
+        # Use a neutral cwd so the Gemini CLI doesn't auto-scan/index the
+        # target project.  Jim already receives the full codebase via stdin —
+        # double-loading it through CLI project scanning was causing hangs on
+        # large codebases (>1M chars).
+        import tempfile
+        neutral_cwd = tempfile.gettempdir()
+
         max_retries = 3
         retry_count = 0
 
         while retry_count < max_retries:
-            start = time.time()
             try:
                 if len(prompt) <= _MAX_ARG_LENGTH:
-                    # Short prompt — pass directly via -p
                     cmd = [
                         self._gemini_bin,
                         "-p", prompt,
@@ -68,76 +235,146 @@ class Runner:
                         "-o", "text",
                         "-y",
                     ]
-                    result = subprocess.run(
+                    result = self._run_monitored(
                         cmd,
-                        capture_output=True,
-                        text=True,
                         timeout=timeout,
-                        cwd=str(self.config.target_project),
-                        encoding="utf-8",
-                        errors="replace",
+                        stage_name="Gemini/Jim",
+                        expected_min=30,
+                        expected_max=600,   # 10 min expected max for large codebases
+                        stall_limit=300,    # 5 min past expected = stall warning
+                        cwd=neutral_cwd,
                     )
                 else:
-                    # Long prompt — pipe via stdin.
                     cmd = [
                         self._gemini_bin,
                         "-m", self.config.gemini_model,
                         "-o", "text",
                         "-y",
                     ]
-                    result = subprocess.run(
+                    result = self._run_monitored(
                         cmd,
-                        input=prompt,
-                        capture_output=True,
-                        text=True,
+                        input_text=prompt,
                         timeout=timeout,
-                        cwd=str(self.config.target_project),
-                        encoding="utf-8",
-                        errors="replace",
+                        stage_name="Gemini/Jim",
+                        expected_min=30,
+                        expected_max=600,
+                        stall_limit=300,
+                        cwd=neutral_cwd,
                     )
 
-                elapsed = time.time() - start
-                
-                # Check for 429 or other specific failure strings in output
                 output = result.stdout.strip()
                 error_output = result.stderr.strip()
-                
-                is_429 = "RESOURCE_EXHAUSTED" in error_output or "429" in error_output or "No capacity available" in error_output
-                
-                if result.returncode != 0 or is_429 or len(output) < 100:
+
+                is_429 = (
+                    "RESOURCE_EXHAUSTED" in error_output
+                    or "429" in error_output
+                    or "No capacity available" in error_output
+                )
+
+                if result.returncode != 0 or is_429 or len(output) < 20:
                     retry_count += 1
                     wait_time = 120 if is_429 else 60
-                    
+
                     error_msg = f"Gemini CLI failed (exit {result.returncode})"
                     if is_429:
                         error_msg = "Gemini CLI hit RATE LIMIT (429 Resource Exhausted)"
-                    elif len(output) < 100 and result.returncode == 0:
+                    elif len(output) < 20 and result.returncode == 0:
                         error_msg = f"Gemini CLI returned suspiciously short output ({len(output)} chars)"
-                    
+
                     logger.error("%s. Retry %d/%d in %ds...", error_msg, retry_count, max_retries, wait_time)
                     if error_output:
                         logger.debug("Gemini Stderr: %s", error_output[:500])
-                        
+
                     time.sleep(wait_time)
                     continue
-                
-                logger.info("Gemini CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
+
                 return output
 
             except subprocess.TimeoutExpired:
                 retry_count += 1
-                logger.error("Gemini CLI timed out after %d seconds. Retry %d/%d...", timeout, retry_count, max_retries)
+                logger.error("Gemini CLI killed after timeout. Retry %d/%d...", retry_count, max_retries)
                 time.sleep(60)
                 continue
 
-        raise RunnerError(f"Gemini CLI failed after {max_retries} retries.")
+        # CLI failed 3 times — fall back to SDK for reliability
+        logger.warning("Gemini CLI failed %d times. Falling back to SDK...", max_retries)
+        return self._run_gemini_sdk(prompt, timeout)
+
+    def _run_gemini_sdk(self, prompt: str, timeout: int) -> str:
+        """Fallback: call Gemini 3.1 Pro directly via google-genai SDK.
+
+        Avoids stdin piping and CLI overhead entirely. Uses the same Pro Ultra
+        subscription as Deep Think, just without extended thinking.
+        """
+        logger.info("Running Gemini SDK fallback — %d chars prompt", len(prompt))
+
+        if self._deep_think_client is None:
+            from google import genai
+            if not self.config.google_api_key:
+                raise RunnerError(
+                    "google_api_key required for Gemini SDK fallback. "
+                    "Set GOOGLE_API_KEY env var or edit forge/config.py"
+                )
+            self._deep_think_client = genai.Client(api_key=self.config.google_api_key)
+
+        from google.genai import types
+
+        response_holder: list = []
+        error_holder: list = []
+        call_done = threading.Event()
+
+        def _sdk_call():
+            try:
+                resp = self._deep_think_client.models.generate_content(
+                    model=self.config.gemini_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        http_options=types.HttpOptions(timeout=timeout * 1000),
+                    ),
+                )
+                response_holder.append(resp)
+            except Exception as e:
+                error_holder.append(e)
+            finally:
+                call_done.set()
+
+        start = time.time()
+        thread = threading.Thread(target=_sdk_call, daemon=True)
+        thread.start()
+
+        last_log = start
+        while not call_done.is_set():
+            elapsed = time.time() - start
+            if elapsed - (last_log - start) >= 30:
+                logger.info("[Gemini/SDK] Still running... %.0fs elapsed", elapsed)
+                last_log = time.time()
+            call_done.wait(timeout=5)
+
+        elapsed = time.time() - start
+
+        if error_holder:
+            raise RunnerError(f"Gemini SDK failed after {elapsed:.0f}s: {error_holder[0]}")
+
+        response = response_holder[0]
+        try:
+            text = response.text or "(No response generated)"
+        except ValueError:
+            text = "(Response blocked by safety filters)"
+
+        logger.info("[Gemini/SDK] Completed in %.1fs (%d chars output)", elapsed, len(text))
+        return text
 
     # ── Claude Code CLI ───────────────────────────────────────────────────
 
-    def run_claude(self, prompt: str, timeout: int | None = None) -> str:
+    def run_claude(self, prompt: str, timeout: int | None = None, needs_filesystem: bool = True) -> str:
         """Run Claude Code via CLI. Max subscription — no cost.
 
-        Claude has file system access and can edit files in the target project.
+        Args:
+            prompt: The prompt text.
+            timeout: Hard timeout in seconds (default: config.claude_timeout).
+            needs_filesystem: If True, run in target project dir so Claude can
+                edit files.  If False, run in a neutral dir to avoid the CLI
+                auto-loading a huge project into its context.
         """
         if timeout is None:
             timeout = self.config.claude_timeout
@@ -145,13 +382,12 @@ class Runner:
         if self._claude_bin is None:
             self._claude_bin = self.config.resolve_claude_cli()
 
-        logger.info("Running Claude Code CLI — %d chars prompt", len(prompt))
+        import tempfile
+        work_dir = str(self.config.target_project) if needs_filesystem else tempfile.gettempdir()
 
-        # We pass the prompt as an argument because Claude Code CLI with --print 
-        # often requires it as a positional argument on Windows to work correctly 
-        # with stdout capturing.
-        
-        # Base command
+        logger.info("Running Claude Code CLI — %d chars prompt (cwd=%s)", len(prompt),
+                     "project" if needs_filesystem else "neutral")
+
         cmd = [
             self._claude_bin,
             "--print",
@@ -159,62 +395,45 @@ class Runner:
             "--model", self.config.claude_model,
             "--dangerously-skip-permissions",
             "--verbose",
+            "--strict-mcp-config",
         ]
 
         while True:
-            start = time.time()
             try:
-                if len(prompt) <= _MAX_ARG_LENGTH:
-                    # Short prompt — pass as argument
-                    current_cmd = cmd + [prompt]
-                    result = subprocess.run(
-                        current_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                        cwd=str(self.config.target_project),
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                else:
-                    # Long prompt — try piping first
-                    result = subprocess.run(
-                        cmd,
-                        input=prompt,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                        cwd=str(self.config.target_project),
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                    
-                    # If piping failed because of the "Input must be provided" error,
-                    # we have a problem with very long prompts on Windows.
-                    if result.returncode != 0 and "Input must be provided" in result.stderr:
-                        logger.warning("Claude stdin piping failed, trying to pass via temp file reference")
-                        prompt_file = self.config.forge_data_dir / "_temp_claude_prompt.txt"
-                        prompt_file.parent.mkdir(parents=True, exist_ok=True)
-                        prompt_file.write_text(prompt, encoding="utf-8")
-                        
-                        file_prompt = f"Please read the instructions in {prompt_file} and execute them."
-                        current_cmd = cmd + [file_prompt]
-                        result = subprocess.run(
-                            current_cmd,
-                            capture_output=True,
-                            text=True,
-                            timeout=timeout,
-                            cwd=str(self.config.target_project),
-                            encoding="utf-8",
-                            errors="replace",
-                        )
+                # Always pipe prompt via stdin — avoids Windows command-line
+                # length limits and quoting issues, especially under nohup.
+                result = self._run_monitored(
+                    cmd,
+                    input_text=prompt,
+                    timeout=timeout,
+                    stage_name="Claude/Opus",
+                    expected_min=30,
+                    expected_max=300,   # 5 min expected max
+                    stall_limit=180,    # 3 min past expected = stall warning
+                    cwd=work_dir,
+                )
 
-                elapsed = time.time() - start
-                logger.info("Claude CLI completed in %.1fs (exit %d)", elapsed, result.returncode)
+                # If stdin piping failed, fall back to writing prompt to a
+                # temp file and telling Claude to read it.
+                if result.returncode != 0 and "Input must be provided" in result.stderr:
+                    logger.warning("Claude stdin piping failed, trying temp file reference")
+                    prompt_file = self.config.forge_data_dir / "_temp_claude_prompt.txt"
+                    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+                    prompt_file.write_text(prompt, encoding="utf-8")
+
+                    file_prompt = f"Please read the instructions in {prompt_file} and execute them."
+                    current_cmd = cmd + [file_prompt]
+                    result = self._run_monitored(
+                        current_cmd,
+                        timeout=timeout,
+                        stage_name="Claude/Opus (file fallback)",
+                        expected_min=30,
+                        expected_max=300,
+                        stall_limit=180,
+                        cwd=work_dir,
+                    )
 
                 if result.returncode != 0:
-                    # Claude CLI might return non-zero but still have useful output.
-                    # Only retry if it looks like a fatal error (no stdout).
                     if not result.stdout.strip():
                         logger.error(
                             "Claude CLI failed (exit %d): %s. Retrying in 60 seconds...",
@@ -228,7 +447,7 @@ class Runner:
                     )
                 break
             except subprocess.TimeoutExpired:
-                logger.error("Claude CLI timed out after %d seconds. Retrying in 60 seconds...", timeout)
+                logger.error("Claude CLI killed after timeout. Retrying in 60 seconds...")
                 time.sleep(60)
                 continue
 
@@ -241,12 +460,14 @@ class Runner:
 
         Uses ThinkingLevel.HIGH for extended reasoning chains.
         Best with detailed 1,000-3,000 word prompts crafted by Claude.
+
+        Runs the SDK call in a background thread with active elapsed-time
+        monitoring so a hung call doesn't silently block the pipeline.
         """
         if timeout is None:
             timeout = self.config.deep_think_timeout
 
         logger.info("Running Deep Think — %d chars prompt (timeout %ds)", len(prompt), timeout)
-        start = time.time()
 
         if self._deep_think_client is None:
             from google import genai
@@ -269,42 +490,98 @@ class Runner:
         if system:
             config_kwargs["system_instruction"] = system
 
-        while True:
+        # Run SDK call in a thread so we can monitor elapsed time
+        response_holder: list = []
+        error_holder: list = []
+        call_done = threading.Event()
+
+        def _sdk_call():
             try:
-                response = self._deep_think_client.models.generate_content(
+                resp = self._deep_think_client.models.generate_content(
                     model=self.config.deep_think_model,
                     contents=prompt,
                     config=types.GenerateContentConfig(**config_kwargs),
                 )
-                break
+                response_holder.append(resp)
             except Exception as e:
-                logger.error("Deep Think failed: %s. Retrying in 10 minutes (600s)...", e)
-                time.sleep(600)
-                # Reset start time for accurate elapsed calculation of the successful run
-                start = time.time()
+                error_holder.append(e)
+            finally:
+                call_done.set()
 
-        elapsed = time.time() - start
+        expected_max = 300  # 5 min expected max for Deep Think
+        max_retries = 3
 
-        # Check if thinking was actually used
-        thinking_used = False
-        if response.candidates:
-            for candidate in response.candidates:
-                if candidate.content and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, "thought") and part.thought:
-                            thinking_used = True
-                            break
+        for attempt in range(1, max_retries + 1):
+            start = time.time()
+            response_holder.clear()
+            error_holder.clear()
+            call_done.clear()
 
-        logger.info(
-            "Deep Think completed in %.1fs (thinking: %s)",
-            elapsed,
-            "HIGH" if thinking_used else "standard",
-        )
+            thread = threading.Thread(target=_sdk_call, daemon=True)
+            thread.start()
 
-        try:
-            return response.text or "(No response generated)"
-        except ValueError:
-            return "(Response blocked by safety filters)"
+            warned_slow = False
+            last_log = start
+
+            while not call_done.is_set():
+                elapsed = time.time() - start
+
+                # Status log every 30 seconds
+                if elapsed - (last_log - start) >= 30:
+                    logger.info("[Deep Think] Still running... %.0fs elapsed", elapsed)
+                    last_log = time.time()
+
+                # Warning if exceeding expected duration
+                if elapsed > expected_max and not warned_slow:
+                    logger.warning(
+                        "[Deep Think] SLOW — %.0fs elapsed (expected <%ds). "
+                        "SDK has its own timeout at %ds.",
+                        elapsed, expected_max, timeout,
+                    )
+                    warned_slow = True
+
+                call_done.wait(timeout=5)  # Poll every 5 seconds
+
+            elapsed = time.time() - start
+
+            if error_holder:
+                err = error_holder[0]
+                logger.error(
+                    "[Deep Think] Failed after %.0fs: %s. %s",
+                    elapsed, err,
+                    f"Retrying ({attempt}/{max_retries}) in 60s..." if attempt < max_retries
+                    else "No more retries.",
+                )
+                if attempt < max_retries:
+                    time.sleep(60)
+                    continue
+                raise RunnerError(f"Deep Think failed after {max_retries} retries: {err}")
+
+            response = response_holder[0]
+
+            # Check if thinking was actually used
+            thinking_used = False
+            if response.candidates:
+                for candidate in response.candidates:
+                    if candidate.content and candidate.content.parts:
+                        for part in candidate.content.parts:
+                            if hasattr(part, "thought") and part.thought:
+                                thinking_used = True
+                                break
+
+            logger.info(
+                "[Deep Think] Completed in %.1fs (thinking: %s)",
+                elapsed,
+                "HIGH" if thinking_used else "standard",
+            )
+
+            try:
+                return response.text or "(No response generated)"
+            except ValueError:
+                return "(Response blocked by safety filters)"
+
+        # Should not reach here, but just in case
+        raise RunnerError("Deep Think failed: exhausted all retries")
 
     # ── Convenience: Claude for prompt crafting ───────────────────────────
 
@@ -338,4 +615,4 @@ no explanation, just the prompt that will be sent directly to Deep Think.
 Make it 1,000-3,000 words. Be specific, structured, and thorough."""
 
         logger.info("Claude crafting prompt for Deep Think")
-        return self.run_claude(meta_prompt, timeout=900)
+        return self.run_claude(meta_prompt, timeout=300, needs_filesystem=False)

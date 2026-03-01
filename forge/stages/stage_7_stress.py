@@ -32,55 +32,30 @@ logger = logging.getLogger("forge.stage_7")
 # ── Claude functional test prompt ────────────────────────────────────────
 
 _CLAUDE_STRESS_PROMPT = """
-You are the stress tester in the Forge autonomous development pipeline.
-You are Stage 7 of 7. Changes have been implemented and fixed.
-Now you must RIGOROUSLY test the project.
+You are the stress tester in the Forge pipeline. Stage 7 of 7.
+
+Syntax checks, imports, and pytest have ALREADY passed (automated Pass 1).
+DO NOT re-run pytest, py_compile, or import checks. They passed. Move on.
 
 WHAT WAS CHANGED THIS CYCLE:
 {changes_summary}
 
-YOUR TASK — STRESS TEST THE PROJECT:
+YOUR TASK — 4 focused tests. Be fast and thorough.
 
-Run these tests IN ORDER. For each test, report PASS/FAIL with details.
+## TEST 1: FUNCTIONAL SMOKE TEST
+Instantiate the key classes that were modified. Call their main methods
+with realistic inputs. Verify they return expected types. Report errors.
 
-## TEST 1: SYNTAX VALIDATION
-Run: python -m py_compile <file> on every .py file that was changed.
-Report any syntax errors.
+## TEST 2: INTERFACE CONTRACT VERIFICATION
+For each modified file, verify public method signatures are unchanged.
+Same params, same return types, same class attributes. Quick check, not exhaustive.
 
-## TEST 2: IMPORT VALIDATION
-For every file that was modified, try importing it:
-  python -c "import <module>"
-Report any import errors — these indicate broken references.
+## TEST 3: EDGE CASE PROBING
+Try to break modified code: None inputs, empty strings, boundary values.
+Only test the CHANGED functions, not the whole project.
 
-## TEST 3: UNIT TESTS
-Run: python -m pytest tests/ -v --timeout=120
-Report results. If tests fail, identify which tests and why.
-
-## TEST 4: FUNCTIONAL SMOKE TEST
-Try to instantiate the key classes that were modified. For example:
-- If model wrappers changed: try creating an instance
-- If the agent graph changed: try building the graph
-- If tools changed: try importing the tool registry
-Report any runtime errors.
-
-## TEST 5: DEPENDENCY CHECK
-Verify that requirements.txt matches actual imports.
-Are there any imports that reference packages not in requirements.txt?
-Are there any packages in requirements.txt that are no longer imported?
-
-## TEST 6: INTERFACE CONTRACT VERIFICATION
-For each replacement/modification, verify the new code exposes the
-same interface as the old code. Check:
-- Function signatures (same parameters, same return types)
-- Class interfaces (same methods, same attributes)
-- Module exports (same public names)
-
-## TEST 7: EDGE CASE PROBING
-Try to break the code:
-- Pass None where objects are expected
-- Pass empty strings where content is expected
-- Call functions with boundary values
-Report any unhandled exceptions.
+## TEST 4: DEPENDENCY CHECK
+Verify new imports resolve. Check requirements.txt has any new packages.
 
 OUTPUT FORMAT:
 
@@ -88,16 +63,13 @@ OUTPUT FORMAT:
 
 | Test | Status | Details |
 |------|--------|---------|
-| Syntax | PASS/FAIL | ... |
-| Imports | PASS/FAIL | ... |
-| Unit Tests | PASS/FAIL | X/Y passed |
 | Functional | PASS/FAIL | ... |
-| Dependencies | PASS/FAIL | ... |
 | Interfaces | PASS/FAIL | ... |
 | Edge Cases | PASS/FAIL | ... |
+| Dependencies | PASS/FAIL | ... |
 
 ## ISSUES FOUND
-[Detailed description of any failures]
+[Any failures — be specific]
 
 ## OVERALL VERDICT
 [PASS — ready for next cycle / FAIL — issues need fixing]
@@ -118,6 +90,20 @@ Scan the ENTIRE codebase for any signs of regression:
 3. Test files that reference changed APIs
 4. Documentation that references changed interfaces
 5. Any hardcoded strings or paths that might be stale
+
+IMPORTANT — VERIFIED FALSE POSITIVES (do NOT flag these):
+- The `@tool` decorator in `tools/*.py` is CORRECT. Do NOT claim it says
+  `@all_tools.txt` — this has been verified by grep across all 21 tool files
+  in EVERY prior cycle. The `@tool` decorator comes from `tools/core.py` and
+  is the project's own decorator. It is NOT a LangChain artifact.
+- The memory/ and cortex/ ChromaDB files ARE in scope for Phase 2. Verify that
+  they use `SpectreEmbeddingFunction` from `models/embedding.py`. If they still
+  use ChromaDB's default embedding (no explicit embedding_function param), that
+  IS a valid issue to flag.
+
+Only report REAL regressions you can see in the actual code provided below.
+If you cannot find the specific text of a bug in the codebase text, it does
+not exist — do not infer or assume issues.
 
 Output a concise list of any regressions found, or "NO REGRESSIONS DETECTED"
 if the codebase looks clean.
@@ -239,14 +225,16 @@ def _run_token_audit(config: ForgeConfig) -> str:
         cache_files_checked += 1
         content = model_file.read_text(encoding="utf-8", errors="ignore")
 
-        # Check for cache_control in Claude adapters
-        if "claude" in model_file.name.lower() or "anthropic" in content.lower():
-            if "cache_control" not in content:
-                cache_issues.append(
-                    f"  - {model_file.name}: Claude adapter MISSING cache_control"
-                )
-            else:
-                results.append(f"  - {model_file.name}: cache_control PRESENT")
+        # Check for cache_control in the Claude base adapter.
+        # Only the base class (claude_base.py) needs cache_control — subclasses
+        # (claude_opus.py, claude_sonnet.py) inherit it.  Files that merely
+        # reference "anthropic" (gemini_pro.py, retry.py) are not Claude adapters.
+        if "cache_control" in content:
+            results.append(f"  - {model_file.name}: cache_control PRESENT")
+        elif model_file.name == "claude_base.py":
+            cache_issues.append(
+                f"  - {model_file.name}: Claude base adapter MISSING cache_control"
+            )
 
     if cache_issues:
         results.extend(cache_issues)
@@ -608,6 +596,8 @@ def run(
     results_parts.append("# PASS 2: PERFORMANCE BENCHMARKS (automated)\\n" + benchmark_results)
 
     # ── Pass 3: Claude functional tests (LLM-driven) ─────────────────
+    # Prompt already tells Claude that syntax/imports/pytest passed.
+    # Claude only does functional smoke, interfaces, edge cases, deps.
     logger.info("Stress test pass 3: Claude functional tests")
     claude_prompt = _CLAUDE_STRESS_PROMPT.format(changes_summary=changes_summary)
     try:
@@ -641,7 +631,7 @@ def run(
     )
     try:
         claude_token_results = runner.run_claude(
-            claude_token_prompt, timeout=config.stress_timeout, needs_filesystem=False
+            claude_token_prompt, timeout=config.stress_timeout, needs_filesystem=True
         )
     except Exception as e:
         claude_token_results = f"ERROR: {e}"

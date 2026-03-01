@@ -73,17 +73,108 @@ class Orchestrator:
 
         previous_results = None
 
+        # Check for an incomplete cycle from a previous crash.
+        # If cycle-001/ exists but has no stress test output, we resume it
+        # instead of starting cycle-002.
+        existing_cycles = sorted(self.config.forge_data_dir.glob("cycle-*"))
+        if existing_cycles:
+            last_cycle_dir = existing_cycles[-1]
+            stress_file = last_cycle_dir / "07-stress-test.md"
+            cycle_num = int(last_cycle_dir.name.split("-")[1])
+            if not stress_file.exists() or stress_file.stat().st_size < 50:
+                # Incomplete cycle — resume it (skip to completed stages)
+                logger.info(
+                    "RESUME DETECTED: cycle-%03d has partial output — resuming mid-cycle",
+                    cycle_num,
+                )
+                self.cycle = cycle_num - 1  # Will be incremented at loop start
+                # Try to load stress test from the PREVIOUS completed cycle
+                # so Jim gets failures/passes context instead of a fresh start.
+                if cycle_num > 1:
+                    prev_stress = self.config.forge_data_dir / f"cycle-{cycle_num - 1:03d}" / "07-stress-test.md"
+                    if prev_stress.exists() and prev_stress.stat().st_size >= 50:
+                        stress_content = prev_stress.read_text(encoding="utf-8", errors="replace")
+                        prev_verdict = self._detect_verdict(stress_content)
+                        previous_results = {
+                            "stress_test": stress_content[:5000],
+                            "stress_verdict": prev_verdict,
+                        }
+                        logger.info("Loaded previous stress test from cycle-%03d (verdict=%s)", cycle_num - 1, prev_verdict)
+            else:
+                # Complete cycle — skip it entirely, start next cycle.
+                # Load the stress test results so Jim gets context.
+                logger.info(
+                    "RESUME DETECTED: cycle-%03d is complete — starting cycle %d",
+                    cycle_num, cycle_num + 1,
+                )
+                self.cycle = cycle_num  # Will be incremented to cycle_num + 1
+                stress_content = stress_file.read_text(encoding="utf-8", errors="replace")
+                last_verdict = self._detect_verdict(stress_content)
+                previous_results = {
+                    "stress_test": stress_content[:5000],
+                    "stress_verdict": last_verdict,
+                }
+                logger.info("Loaded stress test from cycle-%03d (verdict=%s)", cycle_num, last_verdict)
+
+            # Count trailing consecutive clean passes from completed cycles.
+            # This preserves convergence progress across pipeline restarts.
+            for cyc_dir in reversed(existing_cycles):
+                sf = cyc_dir / "07-stress-test.md"
+                if not sf.exists() or sf.stat().st_size < 50:
+                    break  # Incomplete cycle — stop counting
+                content = sf.read_text(encoding="utf-8", errors="replace")
+                if self._detect_verdict(content) == "PASS":
+                    self.consecutive_clean += 1
+                else:
+                    break  # First non-clean cycle — stop counting
+            if self.consecutive_clean > 0:
+                logger.info(
+                    "RESUME: %d consecutive clean pass(es) detected from previous cycles",
+                    self.consecutive_clean,
+                )
+
         while self._should_continue():
             self.cycle += 1
             cycle_dir = self.config.forge_data_dir / f"cycle-{self.cycle:03d}"
             cycle_dir.mkdir(parents=True, exist_ok=True)
 
-            logger.info("")
-            logger.info("=" * 60)
-            logger.info("  CYCLE %d", self.cycle)
-            logger.info("=" * 60)
+            # Detect if this is a resume
+            existing_stages = list(cycle_dir.glob("0*.md")) + list(cycle_dir.glob("0*.log"))
+            if existing_stages:
+                completed = [f.name for f in sorted(existing_stages)]
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info("  CYCLE %d (RESUMING — found: %s)", self.cycle, ", ".join(completed))
+                logger.info("=" * 60)
+            else:
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info("  CYCLE %d", self.cycle)
+                logger.info("=" * 60)
 
             cycle_result = self._run_cycle(cycle_dir, previous_results)
+
+            # If the cycle errored and we haven't retried yet, retry the SAME
+            # cycle instead of moving on. The resume logic will skip completed
+            # stages automatically. Cap at 3 retries per cycle to avoid infinite loops.
+            retry_key = f"_retries_cycle_{self.cycle}"
+            if not hasattr(self, retry_key):
+                setattr(self, retry_key, 0)
+
+            if cycle_result.get("stress_verdict") == "ERROR":
+                retries = getattr(self, retry_key)
+                if retries < 3:
+                    setattr(self, retry_key, retries + 1)
+                    logger.warning(
+                        "Cycle %d errored — retrying (%d/3) with resume from completed stages",
+                        self.cycle, retries + 1,
+                    )
+                    self.cycle -= 1  # Will be re-incremented at loop start
+                    time.sleep(30)  # Brief cooldown before retry
+                    continue
+                else:
+                    logger.error("Cycle %d failed after 3 retries — moving on", self.cycle)
+
             self.cycle_results.append(cycle_result)
 
             # Track convergence
@@ -116,7 +207,13 @@ class Orchestrator:
     # ── Single Cycle ──────────────────────────────────────────────────
 
     def _run_cycle(self, cycle_dir: Path, previous_results: dict | None) -> dict:
-        """Run one complete cycle (all 7 stages). Returns cycle result dict."""
+        """Run one complete cycle with mid-cycle resume support.
+
+        If the pipeline crashed mid-cycle, existing stage outputs in cycle_dir
+        are detected and reused — only incomplete/missing stages are re-run.
+        This means a crash at Stage 5 doesn't waste the 15 minutes Jim and
+        Deep Think already spent on Stages 1-2.
+        """
         result: dict = {
             "cycle": self.cycle,
             "started_at": datetime.now().isoformat(),
@@ -124,76 +221,120 @@ class Orchestrator:
             "errors": [],
         }
 
+        # Known output files per stage. If the file exists and has real content,
+        # that stage already finished — skip it and reuse the output.
+        _STAGE_FILES = {
+            1: "01-jim-analysis.md",
+            2: "02-deep-think-verification.md",
+            3: "03-claude-implementation.log",
+            4: "04-claude-review.md",
+            5: "05-consensus.md",
+            6: "06-fixes-applied.log",
+            7: "07-stress-test.md",
+        }
+        _MIN_OUTPUT_SIZE = 50  # bytes — smaller than this is a partial/corrupt write
+
+        def _stage_done(stage_num: int) -> Path | None:
+            """Return output path if stage already completed, else None."""
+            path = cycle_dir / _STAGE_FILES[stage_num]
+            if path.exists() and path.stat().st_size >= _MIN_OUTPUT_SIZE:
+                return path
+            return None
+
         try:
             # Stage 1: Jim Analysis
-            logger.info("--- Stage 1: Jim Analysis ---")
-            jim_path = stage_1_jim.run(
-                cycle_dir=cycle_dir,
-                config=self.config,
-                runner=self.runner,
-                task_description=self.task,
-                cycle_number=self.cycle,
-                previous_results=previous_results,
-            )
+            jim_path = _stage_done(1)
+            if jim_path:
+                logger.info("--- Stage 1: Jim Analysis --- RESUMED (output exists, skipping)")
+            else:
+                logger.info("--- Stage 1: Jim Analysis ---")
+                jim_path = stage_1_jim.run(
+                    cycle_dir=cycle_dir,
+                    config=self.config,
+                    runner=self.runner,
+                    task_description=self.task,
+                    cycle_number=self.cycle,
+                    previous_results=previous_results,
+                )
             result["stages_completed"].append("jim_analysis")
             result["jim_analysis"] = jim_path.read_text(encoding="utf-8")[:5000]
 
             # Stage 2: Deep Think Verification
-            logger.info("--- Stage 2: Deep Think Verification ---")
-            deep_think_path = stage_2_deep_think.run(
-                cycle_dir=cycle_dir,
-                config=self.config,
-                runner=self.runner,
-                jim_analysis_path=jim_path,
-            )
+            deep_think_path = _stage_done(2)
+            if deep_think_path:
+                logger.info("--- Stage 2: Deep Think Verification --- RESUMED (output exists, skipping)")
+            else:
+                logger.info("--- Stage 2: Deep Think Verification ---")
+                deep_think_path = stage_2_deep_think.run(
+                    cycle_dir=cycle_dir,
+                    config=self.config,
+                    runner=self.runner,
+                    jim_analysis_path=jim_path,
+                )
             result["stages_completed"].append("deep_think")
 
             # Stage 3: Claude Implementation
-            logger.info("--- Stage 3: Claude Implementation ---")
-            impl_path = stage_3_implement.run(
-                cycle_dir=cycle_dir,
-                config=self.config,
-                runner=self.runner,
-                deep_think_path=deep_think_path,
-            )
+            impl_path = _stage_done(3)
+            if impl_path:
+                logger.info("--- Stage 3: Claude Implementation --- RESUMED (output exists, skipping)")
+            else:
+                logger.info("--- Stage 3: Claude Implementation ---")
+                impl_path = stage_3_implement.run(
+                    cycle_dir=cycle_dir,
+                    config=self.config,
+                    runner=self.runner,
+                    deep_think_path=deep_think_path,
+                )
             result["stages_completed"].append("claude_implement")
             result["changes_applied"] = impl_path.read_text(encoding="utf-8")[:5000]
 
             # Stage 4: Claude Self-Review
-            logger.info("--- Stage 4: Claude Self-Review ---")
-            review_path = stage_4_review.run(
-                cycle_dir=cycle_dir,
-                config=self.config,
-                runner=self.runner,
-                implementation_path=impl_path,
-                deep_think_path=deep_think_path,
-            )
+            review_path = _stage_done(4)
+            if review_path:
+                logger.info("--- Stage 4: Claude Self-Review --- RESUMED (output exists, skipping)")
+            else:
+                logger.info("--- Stage 4: Claude Self-Review ---")
+                review_path = stage_4_review.run(
+                    cycle_dir=cycle_dir,
+                    config=self.config,
+                    runner=self.runner,
+                    implementation_path=impl_path,
+                    deep_think_path=deep_think_path,
+                )
             result["stages_completed"].append("claude_review")
 
             # Stage 5: Consensus (Jim + Claude)
-            logger.info("--- Stage 5: Consensus ---")
-            consensus_path = stage_5_consensus.run(
-                cycle_dir=cycle_dir,
-                config=self.config,
-                runner=self.runner,
-                claude_review_path=review_path,
-                implementation_path=impl_path,
-                deep_think_path=deep_think_path,
-            )
+            consensus_path = _stage_done(5)
+            if consensus_path:
+                logger.info("--- Stage 5: Consensus --- RESUMED (output exists, skipping)")
+            else:
+                logger.info("--- Stage 5: Consensus ---")
+                consensus_path = stage_5_consensus.run(
+                    cycle_dir=cycle_dir,
+                    config=self.config,
+                    runner=self.runner,
+                    claude_review_path=review_path,
+                    implementation_path=impl_path,
+                    deep_think_path=deep_think_path,
+                )
             result["stages_completed"].append("consensus")
 
             # Stage 6: Apply Agreed Fixes
-            logger.info("--- Stage 6: Apply Fixes ---")
-            fixes_path = stage_6_fixes.run(
-                cycle_dir=cycle_dir,
-                config=self.config,
-                runner=self.runner,
-                consensus_path=consensus_path,
-                cycle_number=self.cycle,
-            )
+            fixes_path = _stage_done(6)
+            if fixes_path:
+                logger.info("--- Stage 6: Apply Fixes --- RESUMED (output exists, skipping)")
+            else:
+                logger.info("--- Stage 6: Apply Fixes ---")
+                fixes_path = stage_6_fixes.run(
+                    cycle_dir=cycle_dir,
+                    config=self.config,
+                    runner=self.runner,
+                    consensus_path=consensus_path,
+                    cycle_number=self.cycle,
+                )
             result["stages_completed"].append("apply_fixes")
 
-            # Stage 7: Stress Test
+            # Stage 7: Stress Test — NEVER skip. Always re-run to verify current state.
             logger.info("--- Stage 7: Stress Test ---")
             stress_path = stage_7_stress.run(
                 cycle_dir=cycle_dir,
@@ -204,19 +345,56 @@ class Orchestrator:
             )
             result["stages_completed"].append("stress_test")
             stress_content = stress_path.read_text(encoding="utf-8")
-            result["stress_test"] = stress_content[:5000]
+
+            # Build structured cycle summary for next cycle's Jim handoff.
+            # Instead of dumping 5000 chars of raw test output, give Jim a
+            # tight package: what changed → what was reviewed → what stress found.
+            cycle_summary_parts = []
+
+            # 1. What was implemented (from Stage 3)
+            if impl_path.exists():
+                impl_text = impl_path.read_text(encoding="utf-8", errors="replace")
+                cycle_summary_parts.append(f"## Changes Implemented\n{impl_text[:1500]}")
+
+            # 2. What review found (from Stage 4)
+            review_path = cycle_dir / "04-claude-review.md"
+            if review_path.exists():
+                review_text = review_path.read_text(encoding="utf-8", errors="replace")
+                # Extract just the ISSUES FOUND section
+                if "ISSUES FOUND" in review_text:
+                    issues_section = review_text.split("ISSUES FOUND", 1)[1][:1500]
+                    cycle_summary_parts.append(f"## Review Issues\n{issues_section}")
+
+            # 3. What consensus decided (from Stage 5)
+            consensus_path = cycle_dir / "05-consensus.md"
+            if consensus_path.exists():
+                consensus_text = consensus_path.read_text(encoding="utf-8", errors="replace")
+                cycle_summary_parts.append(f"## Consensus\n{consensus_text[:1000]}")
+
+            # 4. Stress test verdicts only (not raw output)
+            verdict_lines = []
+            for line in stress_content.split("\n"):
+                line_s = line.strip()
+                if any(kw in line_s for kw in ["PASS", "FAIL", "VERDICT", "ISSUES FOUND"]):
+                    verdict_lines.append(line_s)
+            if verdict_lines:
+                cycle_summary_parts.append(f"## Stress Test Verdicts\n" + "\n".join(verdict_lines[:30]))
+
+            result["stress_test"] = "\n\n".join(cycle_summary_parts)[:5000]
 
             # Determine stress test verdict
-            # The stress report has 4 sections separated by "=" * 80.
+            # The stress report has 5 sections separated by "=" * 80.
             # Look for verdict signals across all sections:
             # - Pass 1 (structural): "PASS" or "FAIL" at start of line
             # - Pass 3 (Claude): "OVERALL VERDICT" followed by PASS/FAIL
             # - Pass 4 (Jim): "NO REGRESSIONS DETECTED" or regression list
+            # - Pass 5 (Token): "TOKEN EFFICIENCY VERDICT" followed by PASS/FAIL
             stress_lower = stress_content.lower()
 
             has_structural_fail = False
             has_claude_fail = False
             has_jim_fail = False
+            has_token_fail = False
 
             # Split on section dividers for section-aware parsing
             sections = stress_content.split("=" * 80)
@@ -236,8 +414,13 @@ class Orchestrator:
                 if "regression scan" in sec_lower:
                     if "no regressions detected" not in sec_lower:
                         has_jim_fail = True
+                # Token efficiency audit (Pass 5)
+                if "token efficiency verdict" in sec_lower:
+                    token_verdict_area = sec_lower.split("token efficiency verdict")[-1][:200]
+                    if "fail" in token_verdict_area:
+                        has_token_fail = True
 
-            if has_structural_fail or has_claude_fail:
+            if has_structural_fail or has_claude_fail or has_token_fail:
                 result["stress_verdict"] = "FAIL"
             elif has_jim_fail:
                 result["stress_verdict"] = "FAIL"
@@ -250,12 +433,18 @@ class Orchestrator:
                 # If unclear, assume issues remain
                 result["stress_verdict"] = "UNCLEAR"
 
-            # Gather remaining issues for next cycle
+            # Gather remaining issues for next cycle — failures only, concise
             remaining = []
             if result["stress_verdict"] != "PASS":
                 remaining.append(f"Stress test verdict: {result['stress_verdict']}")
-                remaining.append(stress_content[:3000])
-            result["remaining_issues"] = "\\n".join(remaining) if remaining else ""
+                # Only include actual failure lines, not the entire raw dump
+                for line in stress_content.split("\n"):
+                    line_s = line.strip()
+                    if "FAIL" in line_s or "ERROR" in line_s or "ISSUE" in line_s.upper():
+                        remaining.append(line_s)
+                        if len(remaining) >= 20:
+                            break
+            result["remaining_issues"] = "\n".join(remaining) if remaining else ""
 
         except RunnerError as e:
             error_msg = f"Stage failed: {e}"
@@ -275,6 +464,49 @@ class Orchestrator:
 
         result["finished_at"] = datetime.now().isoformat()
         return result
+
+    # ── Verdict Detection ─────────────────────────────────────────────
+
+    @staticmethod
+    def _detect_verdict(stress_content: str) -> str:
+        """Parse a stress test report and return PASS, FAIL, or UNCLEAR.
+
+        Uses section-aware parsing identical to _run_cycle's verdict logic.
+        """
+        stress_lower = stress_content.lower()
+        sections = stress_content.split("=" * 80)
+
+        has_structural_fail = False
+        has_claude_fail = False
+        has_jim_fail = False
+        has_token_fail = False
+
+        for section in sections:
+            sec_lower = section.lower()
+            if "structural tests" in sec_lower and "syntax check" in sec_lower:
+                if "fail" in sec_lower.split("syntax check")[-1][:200]:
+                    has_structural_fail = True
+            if "overall verdict" in sec_lower:
+                verdict_area = sec_lower.split("overall verdict")[-1][:200]
+                if "fail" in verdict_area:
+                    has_claude_fail = True
+            if "regression scan" in sec_lower:
+                if "no regressions detected" not in sec_lower:
+                    has_jim_fail = True
+            if "token efficiency verdict" in sec_lower:
+                token_area = sec_lower.split("token efficiency verdict")[-1][:200]
+                if "fail" in token_area:
+                    has_token_fail = True
+
+        if has_structural_fail or has_claude_fail or has_token_fail:
+            return "FAIL"
+        if has_jim_fail:
+            return "FAIL"
+        if "overall verdict" in stress_lower:
+            return "PASS"
+        if "no regressions detected" in stress_lower:
+            return "PASS"
+        return "UNCLEAR"
 
     # ── Convergence Check ─────────────────────────────────────────────
 

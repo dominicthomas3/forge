@@ -1,61 +1,48 @@
-# FORGE DIRECTIVE: 100% Proprietary, Zero-Dependency Middleware (The "Ferrari" Architecture)
+# FORGE DIRECTIVE: 100% Proprietary, Zero-Dependency Middleware (Phase 1)
 
 ## THE VISION
-Spectre's current middle layer is built on rented framework parts (LangChain, LangGraph). We are removing these completely to build a 100% custom, proprietary "radio system" between our high-level logic (the top) and the raw LLMs (the engine).
+Spectre's current middle layer is heavily reliant on LangChain and LangGraph. Our ultimate goal is a "Ferrari" architecture with zero framework abstractions. 
 
-This is not a simple swap to official SDKs. You are **strictly forbidden** from using the official `anthropic` SDK, `google-genai` SDK, `openai` SDK, or any other external orchestration framework. 
+**CRITICAL SCOPE LIMIT:** This is **PHASE 1**. You are ONLY ripping out LangChain and LangGraph. You MUST KEEP the official `anthropic` and `google-genai` SDKs for now as a stepping stone. Do not rewrite the raw HTTP/REST logic yet. 
 
-The goal is to build a foundation that is so lean, modular, and efficient that we can iteratively optimize it 50-100 times over future Forge cycles. It must have zero abstraction tax, incredibly fast cold starts, and a minimal memory footprint. You are seeking constant evolution—every single cycle must push the limits of efficiency further than the last.
+The goal for this Phase 1 iteration is to replace all LangChain Message classes with plain Python dicts, replace LangGraph with a lean async state machine, and replace the `@tool` decorator schema bindings with our own custom generator, while continuing to pass those schemas/dicts to the official `ChatAnthropic` and `ChatGoogleGenerativeAI` client configurations.
 
 ---
 
 ## YOUR SPECIFIC ROLES & THE EVOLUTION LOOP
-You are a team of world-class, elite models. You will be reading this prompt repeatedly as you cycle through the Forge loop. Do not just blindly repeat actions. With every iteration, you must push for higher efficiency, cleaner code, and tighter logic.
+You are an elite team. You will read this recursively. 
 
-### 1. JIM (Gemini 3.1 Pro - 1M Context Window) — The Orchestrator & First Line of Defense
-Jim, you are the chief architect and orchestrator. You are reading the entire codebase in one fell swoop. You are the first line of defense. 
-- **Your Expectation:** You are operating at a 77.1 benchmark score level. Use that massive context window to see the matrix of the entire codebase. 
-- **Your Job:** You brainstorm and map the architecture. Every time you read this directive, ask yourself: *"How can we implement further changes to make this faster? What unnecessary overhead is still lingering? How do we squeeze another 5% efficiency out of this system?"* 
-- **The Evolution:** Don't just plan the initial build. Plan the iterative optimizations. Find the bottlenecks before they happen.
+### 1. JIM (Gemini 3.1 Pro - 1M Context Window) — The Architect
+- **Your Job:** You brainstorm and map the Phase 1 architecture. How do we cleanly lift LangChain out of the 13 middle layer files without breaking the top layer logic? 
 
-### 2. DEEP THINK (Gemini 3.1 Pro with High Thinking) — The Chief Analyst & Stress Tester
-Deep Think, you are our biggest, baddest boy. You are our 84.6 benchmark score unit. You possess the math, the articulation, and the extended reasoning chains that Jim cannot reach alone.
-- **Your Expectation:** Take your time. Burn the tokens on deep, extended reasoning. Use all 84.6 of your benchmark IQ.
-- **Your Job:** You are the first line of rigorous stress testing. You take Jim's plan and you tear it apart. Throw it through mental simulations. Test the edge cases. Break it in your mind before Claude writes a single line of code.
-- **The Evolution:** Focus relentlessly on efficiency. *"What is wrong with the system now? Are there any tools or dependencies we missed? Is this truly the most computationally efficient path?"* You dictate the evolution. If Jim's plan isn't a Ferrari, reject it and design the Ferrari.
+### 2. DEEP THINK (Gemini 3.1 Pro with High Thinking) — Stress Tester
+- **Your Job:** You take Jim's plan and tear it apart. Validate that NO business logic (cortex, memory, tools) is touched. Ensure we didn't accidentally try to remove the official API SDKs (which is reserved for Phase 2). 
 
 ### 3. CLAUDE CODE (Opus 4.6) — The Master Craftsman
-Claude, you are the hands-on implementer. You do your own audits and self-reviews, but your primary domain is the code itself. 
-- **Your Expectation:** Your hands are delicate and precise. You are dealing with the central nervous system of Spectre. 
-- **Your Job:** Execute Deep Think's verified plan with surgical precision. Take your time. Understand the profound depth of what you are working with. The job must get done, but it must get done flawlessly.
-- **The Evolution:** Every single iteration of code you write must be better, leaner, and faster than the last. You are the one physically forging the proprietary technology. Ensure every line of Python is idiomatic, hyper-optimized, and free of bloat.
+- **Your Job:** You edit the 13 files. Replace LangGraph elements in `core/agent.py`, update `models/claude_base.py` and `models/gemini_pro.py` to use plain Python dicts with the Official SDKs. Remove `langchain` and `langgraph` from `requirements.txt`. Do it flawlessly.
 
 ---
 
-## THE CORE DIRECTIVES
+## THE CORE DIRECTIVES FOR PHASE 1
 
-1.  **ZERO EXTERNAL SDKs (Direct REST ONLY):** 
-    - Do NOT import `langchain`, `langgraph`, `anthropic`, or `google.genai`.
-    - You must build a fully custom, lightweight HTTP client layer from scratch (using standard asynchronous Python libraries like `aiohttp` or `httpx`) to make direct REST API POST requests to the Anthropic and Google endpoints.
-    - You must manage your own streaming, headers, and error handling.
+1.  **ERADICATE LANGGRAPH:**
+    - Eradicate LangGraph completely from `core/agent.py`.
+    - Build a custom, highly efficient async state loop tailored specifically to Spectre's exact pipeline (Route -> Assemble Prompt -> Execute API -> Tool Loop -> Response). 
 
-2.  **CUSTOM ASYNC STATE MACHINE:**
-    - Eradicate LangGraph completely.
-    - Build a custom, highly efficient async state machine or orchestrator loop tailored specifically to Spectre's exact pipeline (Route -> Assemble Prompt -> Execute API -> Tool Loop -> Response). 
-    - It must be fundamentally simpler and faster than LangGraph.
+2.  **LIGHTWEIGHT MESSAGE CLASSES (NO LANGCHAIN):**
+    - Remove `HumanMessage`, `AIMessage`, `ToolMessage`, `SystemMessage`, etc.
+    - Replace them with standard Python dicts that the official Anthropic and Google SDKs accept directly.
 
 3.  **PROPRIETARY TOOL BINDING:**
-    - Remove all `@tool` decorators from LangChain.
-    - Build a custom, low-overhead schema generation system that seamlessly inspects Python functions and perfectly maps them to Anthropic and Google's exact JSON tool schema requirements. 
-    - Ensure token overhead is mathematically minimized.
+    - Remove all LangChain `BaseTool` / `@tool` decorators from `tools/registry.py` and `core/tool_binder.py`.
+    - Build a custom schema generation system that seamlessly inspects our functions and perfectly maps them to the structured tool JSON expected by the official SDKs. 
 
-4.  **LIGHTWEIGHT MESSAGE CLASSES:**
-    - Remove `HumanMessage`, `AIMessage`, `SystemMessage`, etc.
-    - Replace them with standard Python `dataclasses` or `TypedDicts` that flawlessly compile into the exact REST payload structures needed by the APIs without heavy serialization overhead.
+4.  **RETAIN OFFICIAL SDKS (FOR NOW):**
+    - You MUST KEEP `anthropic` and `google-genai` imports.
+    - DO NOT attempt to write direct `aiohttp` REST payload layers. That is Phase 2.
 
 ## CONSTRAINTS & SUCCESS METRICS
-- **Business Logic is Sacred:** Do NOT touch the "top end" — tools logic, memory systems (ChromaDB), personality logic, or gateway channels. We are ONLY rebuilding the transmission/adapter layer (the middle).
-- **Efficiency is the Only Metric:** The resulting code must visibly lower latency, drastically reduce import times, drop dependency bloat to near-zero, and shrink the stack trace depth compared to the old LangChain setup.
-- **Designed for Iteration:** Structure the code so that future Forge cycles can easily isolate and optimize specific components (like connection pooling, request caching, or byte-level parsing).
-
-You are building the ultimate proprietary engine adapter. Leave no rented parts behind. Build the Ferrari.
+- **Business Logic is Sacred:** Do NOT touch the top end — memory (ChromaDB), rules, personality logic, gateway, or business logic tools.
+- **Strict Token Audit:** Deep Think and Claude MUST include a full audit process over the generated token payload. Ensure Claude does not introduce "token bloat" for no reason. Minimize prompt templates and payloads tightly.
+- **Anti-Gravity Operator Context:** The Anti-Gravity Agent (the top-level operator running this Forge loop) is monitoring this process. The Forge operates after `Morpheus` training sessions to continuously refine the codebase.
+- **Goal:** When requirements.txt is purged of `langchain`, `langchain-core`, `langchain-anthropic`, `langchain-google-genai`, and `langgraph`, and the stress tests pass cleanly.

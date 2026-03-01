@@ -75,47 +75,37 @@ FULL CODEBASE:
 
 _SUBSEQUENT_CYCLE_PROMPT = """
 You are Jim — the senior analyst on the Forge autonomous development pipeline.
-This is CYCLE {cycle_number}. Previous cycle results are below.
+This is CYCLE {cycle_number}.
 
 YOUR ROLE:
-Review what happened in the previous cycle. Analyze the stress test results,
-the remaining issues, and the current state of the codebase. Produce an
-updated analysis and plan for this cycle.
+Fix the issues found in the last cycle's stress test. You have the current
+codebase below — it already includes all previous changes. Focus ONLY on
+what's still broken. Don't re-analyze what's already working.
 
 ORIGINAL TASK:
 {task_description}
 
-PREVIOUS CYCLE STRESS TEST RESULTS:
-{stress_test_results}
+LAST CYCLE VERDICT: {verdict}
 
-REMAINING ISSUES FROM PREVIOUS CYCLE:
-{remaining_issues}
+WHAT FAILED (fix these):
+{failures}
 
-CHANGES APPLIED IN PREVIOUS CYCLE:
-{previous_changes}
+WHAT PASSED (don't break these):
+{passes}
 
 WHAT YOU MUST PRODUCE:
 
-1. **PROGRESS ASSESSMENT** — What was accomplished in the previous cycle:
-   - Which changes were applied successfully
-   - Which issues were resolved
-   - What's still broken or incomplete
+1. **ROOT CAUSE** — For each failure, WHY it failed (be specific: file, line, logic error)
 
-2. **ROOT CAUSE ANALYSIS** — For any remaining issues:
-   - Why weren't they fixed in the previous cycle?
-   - Are they deeper than initially assessed?
-   - Do they require a different approach?
+2. **FIX PLAN** — Ordered list of changes to fix the failures:
+   - File, function/class, specific modification
+   - How to verify the fix won't break what's already passing
 
-3. **UPDATED PLAN** — What to do THIS cycle:
-   - Ordered list of changes, prioritized by impact
-   - For each change: file, function/class, specific modification
-   - Any new approach needed for persistent issues
+3. **RISK CHECK** — Any regression risk from these fixes?
 
-4. **VALIDATION** — Stress-test the updated plan:
-   - Will these changes conflict with previous cycle's changes?
-   - Any regression risk from the proposed modifications?
+Be concise. The codebase is below — reference exact file paths and functions.
 
-CURRENT CODEBASE (with previous cycle's changes applied):
+CURRENT CODEBASE:
 {codebase}
 """
 
@@ -143,12 +133,34 @@ def run(
             codebase=codebase,
         )
     else:
+        # Parse stress test into concise failures/passes — don't dump raw text.
+        # This keeps prompt size constant across iterations.
+        stress_raw = previous_results.get("stress_test", "")
+        verdict = previous_results.get("stress_verdict", "UNKNOWN")
+        failures = []
+        passes = []
+
+        for line in stress_raw.split("\n"):
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            line_lower = line_stripped.lower()
+            # Capture FAIL lines with their details
+            if "fail" in line_lower and ("|" in line_stripped or "—" in line_stripped or ":" in line_stripped):
+                failures.append(line_stripped)
+            # Capture PASS lines
+            elif "pass" in line_lower and ("|" in line_stripped or "—" in line_stripped):
+                passes.append(line_stripped)
+            # Capture ISSUES FOUND section headers and bug descriptions
+            elif line_stripped.startswith("| ") and ("HIGH" in line_stripped or "MEDIUM" in line_stripped or "LOW" in line_stripped):
+                failures.append(line_stripped)
+
         prompt = _SUBSEQUENT_CYCLE_PROMPT.format(
             cycle_number=cycle_number,
             task_description=task_description,
-            stress_test_results=previous_results.get("stress_test", "No stress test results."),
-            remaining_issues=previous_results.get("remaining_issues", "No issues recorded."),
-            previous_changes=previous_results.get("changes_applied", "No changes recorded."),
+            verdict=verdict,
+            failures="\n".join(failures[:30]) if failures else "None — all tests passed.",
+            passes="\n".join(passes[:20]) if passes else "No pass data available.",
             codebase=codebase,
         )
 

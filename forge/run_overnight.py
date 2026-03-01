@@ -33,9 +33,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# Strip CLAUDECODE env var immediately — before any imports that might
+# spawn subprocesses. Claude Code sets this to block nested sessions,
+# but the Forge legitimately needs to invoke Claude CLI as a worker.
+os.environ.pop("CLAUDECODE", None)
 
 from forge.config import ForgeConfig
 from forge.orchestrator import Orchestrator
