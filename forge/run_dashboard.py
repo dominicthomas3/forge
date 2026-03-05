@@ -75,15 +75,20 @@ def ensure_port_available(port: int) -> None:
                 capture_output=True, text=True, timeout=5,
             )
             for line in out.stdout.splitlines():
-                if f":{port}" in line and "LISTENING" in line:
-                    pid = line.strip().split()[-1]
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", pid],
-                        capture_output=True, timeout=5,
-                    )
-                    print(f"  [CLEANUP] Killed PID {pid}")
-                    time.sleep(2)
-                    break
+                parts = line.strip().split()
+                # Match exact port in local address column (e.g., "127.0.0.1:8080")
+                if len(parts) >= 5 and "LISTENING" in line:
+                    local_addr = parts[1]
+                    if local_addr.endswith(f":{port}"):
+                        pid = parts[-1]
+                        if pid.isdigit():
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", pid],
+                                capture_output=True, timeout=5,
+                            )
+                            print(f"  [CLEANUP] Killed PID {pid}")
+                            time.sleep(2)
+                            break
         except Exception as e:
             print(f"  [CLEANUP] Warning: {e}")
     else:
@@ -210,7 +215,11 @@ Examples:
         app.native.start_args['gui'] = 'edgechromium'
 
     # ── Clean shutdown: when window closes, kill the server ──────────
-    app.on_shutdown(lambda: os._exit(0))
+    def _graceful_exit():
+        logging.shutdown()
+        os._exit(0)  # Hard exit after flushing logs — NiceGUI server won't stop otherwise
+
+    app.on_shutdown(_graceful_exit)
 
     # Build the dashboard
     event_bus = EventBus() if args.mode == "live" else None
@@ -282,7 +291,7 @@ Examples:
         window_size=(1400, 900),
         frameless=True,
         reconnect_timeout=30.0,
-        storage_secret="forge-session-persistence",
+        storage_secret=os.environ.get("FORGE_SESSION_SECRET", "forge-session-" + str(os.getpid())),
         on_air=None,
     )
 

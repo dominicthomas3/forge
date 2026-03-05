@@ -157,6 +157,14 @@ class UpdateManager:
             if _TARFILE_HAS_FILTER:
                 tar.extractall(path=target_dir, filter="data")
             else:
+                # Manual zip-slip protection for Python < 3.12
+                resolved_target = str(target_dir.resolve())
+                for member in tar.getmembers():
+                    member_path = (target_dir / member.name).resolve()
+                    if not str(member_path).startswith(resolved_target):
+                        raise ValueError(f"Path traversal detected in tar member: {member.name}")
+                    if member.issym() or member.islnk():
+                        raise ValueError(f"Symlink in tar archive rejected: {member.name}")
                 tar.extractall(path=target_dir)
 
         # Copy .env from project root so the new version can find its config

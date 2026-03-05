@@ -116,10 +116,11 @@ class EventBus:
         loop = self._loop
         if loop and loop.is_running():
             for cb in list(self._async_callbacks):
+                coro = cb(event)
                 try:
-                    loop.call_soon_threadsafe(loop.create_task, cb(event))
+                    loop.call_soon_threadsafe(loop.create_task, coro)
                 except RuntimeError:
-                    pass  # Loop closed — skip
+                    coro.close()  # Prevent "coroutine never awaited" warning
 
         # Queue — non-blocking put (bounded to 1000)
         if self._queue is not None:

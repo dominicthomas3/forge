@@ -857,16 +857,18 @@ class ForgeDashboard:
 
     def _settings_field(self, label: str, value: str) -> None:
         """Render a read-only settings field."""
+        safe_label = html_mod.escape(str(label))
+        safe_value = html_mod.escape(str(value))
         with ui.row().classes("w-full items-center q-py-xs"):
             ui.html(
                 f'<span style="font-size:11px; color:{FORGE_TEXT_DIM}; '
-                f'min-width:120px; display:inline-block;">{label}</span>'
+                f'min-width:120px; display:inline-block;">{safe_label}</span>'
             )
             ui.html(
                 f'<span style="font-size:11px; color:{FORGE_TEXT}; '
                 f'padding: 2px 8px; border: 1px solid {FORGE_BORDER}; '
                 f'background: {FORGE_SURFACE_2}; max-width:180px; '
-                f'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{value}</span>'
+                f'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{safe_value}</span>'
             )
 
     async def _check_for_updates(self) -> None:
@@ -885,8 +887,8 @@ class ForgeDashboard:
                 project_root=Path(__file__).parent.parent,
             )
             result = await mgr.check_for_update()
-            if result and result.get("update_available"):
-                ver = result.get("version", "?")
+            if result:
+                ver = html_mod.escape(result.get("version", "?"))
                 if self._update_status_label:
                     self._update_status_label._props["innerHTML"] = (
                         f'<span style="font-size:9px; color:{FORGE_WARN}; '
@@ -903,11 +905,13 @@ class ForgeDashboard:
 
     @staticmethod
     def _make_info_chip(label: str, value: str) -> str:
+        safe_label = html_mod.escape(str(label))
+        safe_value = html_mod.escape(str(value))
         return (
             f'<span style="margin: 0 8px;">'
             f'<span style="font-size:9px; color:{FORGE_TEXT_DIM}; '
-            f'letter-spacing:0.1em;">{label}: </span>'
-            f'<span style="font-size:11px; color:{FORGE_TEXT};">{value}</span>'
+            f'letter-spacing:0.1em;">{safe_label}: </span>'
+            f'<span style="font-size:11px; color:{FORGE_TEXT};">{safe_value}</span>'
             f'</span>'
         )
 
@@ -1202,7 +1206,8 @@ class ForgeDashboard:
 
         # Cap visible error panels to 10 — remove oldest
         while len(self._error_container.default_slot.children) >= 10:
-            self._error_container.remove(0)
+            oldest = self._error_container.default_slot.children[0]
+            self._error_container.remove(oldest)
 
         with self._error_container:
             with ui.element("div").classes("forge-error-panel"):
@@ -1254,12 +1259,14 @@ class ForgeDashboard:
                 return
 
             for entry in reversed(self.cycle_history[-20:]):
-                verdict = entry.get("verdict", "ERROR")
-                stages = entry.get("stages", 0)
-                errors = entry.get("errors", 0)
-                cycle_num = entry.get("cycle", 0)
+                verdict = html_mod.escape(str(entry.get("verdict", "ERROR")))
+                stages = int(entry.get("stages", 0))
+                errors = int(entry.get("errors", 0))
+                cycle_num = int(entry.get("cycle", 0))
                 ts = entry.get("timestamp")
-                time_str = ts.strftime("%H:%M:%S") if isinstance(ts, datetime) else ""
+                time_str = html_mod.escape(
+                    ts.strftime("%H:%M:%S") if isinstance(ts, datetime) else ""
+                )
 
                 if verdict == "PASS":
                     badge_class = "verdict-pass"
@@ -1332,8 +1339,16 @@ class ForgeDashboard:
         if not cycle_name or not self._history_output:
             return
 
+        # Validate cycle_name to prevent path traversal
+        import re
+        if not re.match(r'^cycle-\d{1,4}$', cycle_name):
+            return
+
         self._history_output.clear()
         cycle_dir = self.config.forge_data_dir / cycle_name
+        # Verify resolved path is under forge_data_dir
+        if not str(cycle_dir.resolve()).startswith(str(self.config.forge_data_dir.resolve())):
+            return
 
         if not cycle_dir.exists():
             with self._history_output:
