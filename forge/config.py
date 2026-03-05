@@ -68,6 +68,18 @@ class ForgeConfig:
         ".forge_data", ".pipeline", ".mypy_cache", ".pytest_cache",
         "eggs", ".eggs", "dist", "build", ".tox",
     )
+    # Exact filenames to exclude (secrets, credentials).
+    exclude_filenames: tuple = (
+        ".env", ".env.local", ".env.production", ".env.staging",
+        "secrets.json", "secrets.yaml", "secrets.yml", "secrets.toml",
+        "credentials.json", "credentials.yaml", "credentials.yml",
+        "service-account.json",
+    )
+    # File patterns (by extension) to exclude — private keys, certs.
+    exclude_filename_patterns: tuple = (
+        "*.pem", "*.key", "*.p12", "*.pfx", "*.jks",
+        "*.keystore", "*.secret",
+    )
 
     def __post_init__(self):
         self.target_project = Path(self.target_project).resolve()

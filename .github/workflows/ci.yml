@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" 2>/dev/null || pip install -e .
+
+      - name: Check syntax
+        run: python -m py_compile forge/__init__.py forge/orchestrator.py forge/events.py forge/dashboard.py
+
+      - name: Check imports
+        run: python -c "from forge.events import EventBus, EventType; from forge.dashboard import ForgeDashboard; print('All imports OK')"

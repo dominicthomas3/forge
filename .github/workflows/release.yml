@@ -1,0 +1,140 @@
+name: Release Forge
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Publish Forge Update
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Check syntax
+        run: python -c "from forge.events import EventBus; from forge.dashboard import ForgeDashboard; print('OK')"
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Stamp version into source
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > forge/version.py <<PYEOF
+          """Forge version constants — stamped by GitHub Actions at release time."""
+
+          FORGE_VERSION = "${VERSION}"
+          FORGE_CODENAME = "Dashboard"
+          PYEOF
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' forge/version.py
+          echo "Stamped FORGE_VERSION=${VERSION}"
+          cat forge/version.py
+
+          # Also update __init__.py
+          sed -i "s/__version__ = .*/__version__ = \"${VERSION}\"/" forge/__init__.py
+
+          # And pyproject.toml (anchored to line start to avoid matching other keys)
+          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+
+      - name: Create release tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Create tarball in /tmp to avoid 'file changed as we read it'
+          tar czf "/tmp/forge-${VERSION}.tar.gz" \
+            --exclude='__pycache__' \
+            --exclude='.venv' \
+            --exclude='.env' \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='*.pyc' \
+            --exclude='.forge_data' \
+            --exclude='forge_versions' \
+            --exclude='*.log' \
+            .
+          mv "/tmp/forge-${VERSION}.tar.gz" .
+
+      - name: Calculate SHA-256
+        id: hash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          HASH=$(sha256sum "forge-${VERSION}.tar.gz" | cut -d' ' -f1)
+          echo "sha256=$HASH" >> $GITHUB_OUTPUT
+          echo "Hash: $HASH"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: forge-${{ steps.version.outputs.version }}.tar.gz
+          body: |
+            ## Forge v${{ steps.version.outputs.version }}
+
+            **SHA-256:** `${{ steps.hash.outputs.sha256 }}`
+
+            ### Changes
+            See commit history for details.
+
+            ### Installation
+            ```bash
+            pip install -e .
+            forge-dashboard  # Review mode
+            forge-dashboard --mode live --task "Your task"  # Live mode
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to Supabase Storage
+        if: env.SUPABASE_URL != '' && env.SUPABASE_SERVICE_KEY != ''
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          curl --fail-with-body -X POST \
+            "${SUPABASE_URL}/storage/v1/object/forge-updates/releases/${VERSION}/forge-${VERSION}.tar.gz" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
+            --data-binary "@forge-${VERSION}.tar.gz"
+
+      - name: Write latest.json manifest to Supabase Storage
+        if: env.SUPABASE_URL != '' && env.SUPABASE_SERVICE_KEY != ''
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.hash.outputs.sha256 }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          cat > latest.json <<EOF
+          {
+            "version": "${VERSION}",
+            "storage_path": "releases/${VERSION}/forge-${VERSION}.tar.gz",
+            "sha256_hash": "${SHA256}",
+            "changelog": "Forge v${VERSION}",
+            "created_at": "${TIMESTAMP}"
+          }
+          EOF
+
+          curl --fail-with-body -X POST \
+            "${SUPABASE_URL}/storage/v1/object/forge-updates/latest.json" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "x-upsert: true" \
+            --data-binary "@latest.json"

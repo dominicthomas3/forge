@@ -73,6 +73,20 @@ OUTPUT FORMAT:
 
 ## OVERALL VERDICT
 [PASS — ready for next cycle / FAIL — issues need fixing]
+
+IMPORTANT — MACHINE-READABLE VERDICT:
+After your full analysis, you MUST end your response with exactly one of these
+JSON blocks on its own line (no extra text on the same line):
+
+```json
+{{"verdict": "PASS"}}
+```
+
+or
+
+```json
+{{"verdict": "FAIL"}}
+```
 """
 
 # ── Jim regression scan prompt ────────────────────────────────────────────
@@ -107,6 +121,22 @@ not exist — do not infer or assume issues.
 
 Output a concise list of any regressions found, or "NO REGRESSIONS DETECTED"
 if the codebase looks clean.
+
+IMPORTANT — MACHINE-READABLE VERDICT:
+After your full analysis, you MUST end your response with exactly one of these
+JSON blocks on its own line:
+
+```json
+{{"verdict": "PASS"}}
+```
+
+or
+
+```json
+{{"verdict": "FAIL"}}
+```
+
+Use PASS if no regressions were found, FAIL if any were found.
 
 CURRENT CODEBASE:
 {codebase}
@@ -198,6 +228,20 @@ OUTPUT FORMAT:
 
 ## ISSUES FOUND
 [Detailed description of any token efficiency problems]
+
+IMPORTANT — MACHINE-READABLE VERDICT:
+After your full analysis, you MUST end your response with exactly one of these
+JSON blocks on its own line (no extra text on the same line):
+
+```json
+{{"verdict": "PASS"}}
+```
+
+or
+
+```json
+{{"verdict": "FAIL"}}
+```
 """
 
 
@@ -563,6 +607,7 @@ def run(
     runner: Runner,
     implementation_path: Path,
     fixes_path: Path | None,
+    codebase: str | None = None,
 ) -> Path:
     """Run stress testing suite. Returns path to the output file."""
     output_path = cycle_dir / "07-stress-test.md"
@@ -601,14 +646,15 @@ def run(
     logger.info("Stress test pass 3: Claude functional tests")
     claude_prompt = _CLAUDE_STRESS_PROMPT.format(changes_summary=changes_summary)
     try:
-        claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout, needs_filesystem=False)
+        claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout, needs_filesystem=True)
         results_parts.append("# PASS 3: CLAUDE FUNCTIONAL TESTS\\n" + claude_results)
     except Exception as e:
         results_parts.append(f"# PASS 3: CLAUDE FUNCTIONAL TESTS\\nERROR: {e}")
 
     # ── Pass 4: Jim regression scan (full codebase) ───────────────────
     logger.info("Stress test pass 4: Jim regression scan")
-    codebase = load_codebase(config)
+    if codebase is None:
+        codebase = load_codebase(config)
     jim_prompt = _JIM_REGRESSION_PROMPT.format(
         changes_summary=changes_summary,
         codebase=codebase,

@@ -6,9 +6,28 @@ so the model can reference specific files and line numbers.
 
 from __future__ import annotations
 
+import fnmatch
 from pathlib import Path
 
 from forge.config import ForgeConfig
+
+
+def _is_sensitive_file(path: Path, config: ForgeConfig) -> bool:
+    """Check if a file should be excluded for security reasons.
+
+    Matches against exact filenames and glob patterns defined in config.
+    Prevents secrets, credentials, and private keys from being loaded
+    into LLM context windows.
+    """
+    name = path.name
+    # Exact filename match
+    if name in config.exclude_filenames:
+        return True
+    # Pattern match (e.g., *.pem, *.key)
+    for pattern in config.exclude_filename_patterns:
+        if fnmatch.fnmatch(name, pattern):
+            return True
+    return False
 
 
 def load_codebase(config: ForgeConfig) -> str:
@@ -31,6 +50,9 @@ def load_codebase(config: ForgeConfig) -> str:
         # Skip non-source files
         if path.suffix not in config.source_extensions:
             continue
+        # Skip sensitive files (secrets, credentials, keys)
+        if _is_sensitive_file(path, config):
+            continue
         # Skip binary files (quick heuristic)
         if path.suffix in {".pyc", ".pyo", ".so", ".dll", ".exe", ".bin", ".dat"}:
             continue
@@ -41,10 +63,9 @@ def load_codebase(config: ForgeConfig) -> str:
             line_count = content.count("\\n") + 1
             total_lines += line_count
             parts.append(
-                f"\\n{'=' * 80}\\n"
-                f"# FILE: {rel_path} ({line_count} lines)\\n"
-                f"{'=' * 80}\\n"
+                f'\\n<file path="{rel_path}" lines="{line_count}">\\n'
                 f"{content}"
+                f"</file>"
             )
             files_loaded += 1
         except Exception:
@@ -79,6 +100,8 @@ def get_codebase_stats(config: ForgeConfig) -> dict:
         if any(excluded in path.parts for excluded in config.exclude_dirs):
             continue
         if path.suffix not in config.source_extensions:
+            continue
+        if _is_sensitive_file(path, config):
             continue
 
         try:

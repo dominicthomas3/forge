@@ -21,8 +21,13 @@ logger = logging.getLogger("forge.stage_1")
 # ── Prompt for first cycle (fresh analysis) ───────────────────────────────
 
 _FIRST_CYCLE_PROMPT = """
+FULL CODEBASE:
+{codebase}
+
+---
+
 You are Jim — the senior analyst on an autonomous AI development pipeline called Forge.
-Your unique advantage: you can see the ENTIRE codebase at once in your 1M token context.
+Your unique advantage: you can see the ENTIRE codebase above in your 1M token context.
 No other model in this pipeline has this capability.
 
 YOUR ROLE:
@@ -66,20 +71,22 @@ WHAT YOU MUST PRODUCE:
 Be thorough. Be specific. Reference exact file paths and line ranges.
 The next stage (Deep Think) will verify your plan with extended reasoning —
 give it enough detail to work with.
-
-FULL CODEBASE:
-{codebase}
 """
 
 # ── Prompt for subsequent cycles (with previous results) ──────────────────
 
 _SUBSEQUENT_CYCLE_PROMPT = """
+CURRENT CODEBASE:
+{codebase}
+
+---
+
 You are Jim — the senior analyst on the Forge autonomous development pipeline.
 This is CYCLE {cycle_number}.
 
 YOUR ROLE:
 Fix the issues found in the last cycle's stress test. You have the current
-codebase below — it already includes all previous changes. Focus ONLY on
+codebase above — it already includes all previous changes. Focus ONLY on
 what's still broken. Don't re-analyze what's already working.
 
 ORIGINAL TASK:
@@ -103,10 +110,7 @@ WHAT YOU MUST PRODUCE:
 
 3. **RISK CHECK** — Any regression risk from these fixes?
 
-Be concise. The codebase is below — reference exact file paths and functions.
-
-CURRENT CODEBASE:
-{codebase}
+Be concise. The codebase is above — reference exact file paths and functions.
 """
 
 
@@ -117,14 +121,16 @@ def run(
     task_description: str,
     cycle_number: int,
     previous_results: dict | None = None,
+    codebase: str | None = None,
 ) -> Path:
     """Run Jim's analysis. Returns path to the output file."""
     output_path = cycle_dir / "01-jim-analysis.md"
 
     logger.info("Stage 1: Jim Analysis (cycle %d)", cycle_number)
 
-    # Load the full codebase
-    codebase = load_codebase(config)
+    # Use pre-loaded codebase if provided, otherwise load fresh
+    if codebase is None:
+        codebase = load_codebase(config)
     logger.info("Codebase loaded: %d characters", len(codebase))
 
     if cycle_number == 1 or previous_results is None:

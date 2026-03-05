@@ -344,10 +344,14 @@ class Morpheus:
     and produces evaluation reports.
     """
 
+    # Keywords that indicate a fact was planted for Spectre to remember
+    _MEMORY_KEYWORDS = ("remember", "file away", "don't forget", "keep in mind", "note that")
+
     def __init__(self, config: ForgeConfig, runner: Runner):
         self.config = config
         self.runner = runner
         self.exchanges: list[Exchange] = []
+        self.planted_facts: list[str] = []  # Facts planted during memory category
         self.session_start = time.time()
         self._spectre_agent = None
 
@@ -399,6 +403,18 @@ class Morpheus:
                 notes=f"Error: {e}",
             )
 
+    def _extract_planted_facts(self, exchange: Exchange) -> None:
+        """Extract planted facts from exchanges containing memory keywords.
+
+        When Morpheus tells Spectre to "remember" something, we track
+        that fact so it can be tested for recall later, regardless of
+        how many exchanges have passed since planting.
+        """
+        sent_lower = exchange.sent.lower()
+        if any(kw in sent_lower for kw in self._MEMORY_KEYWORDS):
+            self.planted_facts.append(exchange.sent)
+            logger.info("  Planted fact tracked: %s", exchange.sent[:80])
+
     async def _generate_adaptive_message(
         self,
         category: str,
@@ -427,13 +443,22 @@ class Morpheus:
         else:
             adaptive_notes = "This is early in the category. Start at moderate difficulty."
 
+        # Include planted facts so Morpheus can reference them in any category
+        facts_context = ""
+        if self.planted_facts:
+            facts_context = (
+                "\n\nPLANTED FACTS (things you told Spectre to remember — "
+                "you can test recall of these at any time):\n"
+                + "\n".join(f"- {fact[:200]}" for fact in self.planted_facts)
+            )
+
         prompt = _GENERATE_NEXT_MESSAGE_PROMPT.format(
             morpheus_personality=_MORPHEUS_PERSONALITY,
             transcript=transcript or "(No conversation yet — this is the first message)",
             last_response=last_exchange.received[:500] if last_exchange else "(First message)",
             category=category,
             remaining=remaining,
-            adaptive_notes=adaptive_notes,
+            adaptive_notes=adaptive_notes + facts_context,
         )
 
         try:
@@ -491,6 +516,7 @@ class Morpheus:
                 exchange = await self._send_to_spectre(first_msg)
                 exchange.category = category
                 self.exchanges.append(exchange)
+                self._extract_planted_facts(exchange)
                 logger.info(
                     "  [%s] Sent: %s... → Model: %s, Latency: %dms",
                     category, first_msg[:50], exchange.model_key, exchange.latency_ms,
@@ -506,6 +532,7 @@ class Morpheus:
                     exchange = await self._send_to_spectre(msg)
                     exchange.category = category
                     self.exchanges.append(exchange)
+                    self._extract_planted_facts(exchange)
                     logger.info(
                         "  [%s] Sent: %s... → Model: %s, Latency: %dms",
                         category, msg[:50], exchange.model_key, exchange.latency_ms,
@@ -522,6 +549,42 @@ class Morpheus:
                     logger.info(
                         "  [memory_recall] Testing planted fact recall → %s",
                         exchange.received[:100],
+                    )
+
+            # ── Phase 1.5: Delayed memory recall test ─────────────────
+            # After ALL categories are done (20+ exchanges since planting),
+            # test if Spectre still remembers the planted facts. This catches
+            # memory systems that work short-term but fail with distance.
+            if self.planted_facts:
+                logger.info("--- Delayed Memory Recall Test ---")
+                # Build a natural recall prompt from the planted facts
+                recall_prompts = []
+                for fact in self.planted_facts:
+                    fact_lower = fact.lower()
+                    if "city" in fact_lower or "tokyo" in fact_lower:
+                        recall_prompts.append("What's my favorite city?")
+                    elif "birthday" in fact_lower or "march" in fact_lower:
+                        recall_prompts.append("When's my birthday?")
+                    elif "project" in fact_lower or "forge" in fact_lower:
+                        recall_prompts.append("What project am I working on?")
+                    else:
+                        # Generic recall probe
+                        recall_prompts.append(
+                            "Earlier I asked you to remember something. What was it?"
+                        )
+
+                # Deduplicate and send
+                for recall_msg in dict.fromkeys(recall_prompts):
+                    exchange = await self._send_to_spectre(recall_msg)
+                    exchange.category = "delayed_memory_recall"
+                    exchange.notes = (
+                        f"Delayed recall test — {len(self.exchanges)} exchanges "
+                        f"since facts were planted"
+                    )
+                    self.exchanges.append(exchange)
+                    logger.info(
+                        "  [delayed_recall] %s → %s",
+                        recall_msg, exchange.received[:100],
                     )
 
             # ── Phase 2: The Matrix moment (first session only) ──────

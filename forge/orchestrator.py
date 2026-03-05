@@ -18,12 +18,15 @@ The morning report summarizes everything.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
 
+from forge.codebase import load_codebase
 from forge.config import ForgeConfig
+from forge.events import EventBus, EventType, ForgeEvent
 from forge.runner import Runner, RunnerError
 from forge.stages import (
     stage_1_jim,
@@ -50,6 +53,7 @@ class Orchestrator:
         self.consecutive_clean = 0
         self.cycle_results: list[dict] = []
         self.errors: list[str] = []
+        self.event_bus = EventBus()
 
     # ── Main Loop ─────────────────────────────────────────────────────
 
@@ -63,6 +67,15 @@ class Orchestrator:
                      self.config.max_cycles, self.config.max_wall_hours,
                      self.config.convergence_threshold)
         logger.info("=" * 80)
+
+        self.event_bus.emit_simple(
+            EventType.PIPELINE_STARTED,
+            task=self.task[:200],
+            target=str(self.config.target_project),
+            max_cycles=self.config.max_cycles,
+            max_wall_hours=self.config.max_wall_hours,
+            convergence_threshold=self.config.convergence_threshold,
+        )
 
         # Create data directory
         self.config.forge_data_dir.mkdir(parents=True, exist_ok=True)
@@ -202,6 +215,14 @@ class Orchestrator:
         logger.info("Morning report: %s", report_path)
         logger.info("=" * 80)
 
+        self.event_bus.emit_simple(
+            EventType.PIPELINE_FINISHED,
+            total_cycles=self.cycle,
+            elapsed_hours=round((time.time() - self.start_time) / 3600, 2),
+            report_path=str(report_path),
+            consecutive_clean=self.consecutive_clean,
+        )
+
         return report_path
 
     # ── Single Cycle ──────────────────────────────────────────────────
@@ -220,6 +241,8 @@ class Orchestrator:
             "stages_completed": [],
             "errors": [],
         }
+
+        self.event_bus.emit_simple(EventType.CYCLE_STARTED, cycle=self.cycle)
 
         # Known output files per stage. If the file exists and has real content,
         # that stage already finished — skip it and reuse the output.
@@ -241,13 +264,27 @@ class Orchestrator:
                 return path
             return None
 
+        impl_branch = None  # Set before try so except handlers can reference it
+
         try:
+            # Load codebase once at cycle start — shared across stages 1, 5, 7.
+            # Reloaded after stages 3 and 6 which modify files.
+            codebase_snapshot = load_codebase(self.config)
+            logger.info("Codebase loaded for cycle: %d chars", len(codebase_snapshot))
+            self.event_bus.emit_simple(
+                EventType.CODEBASE_LOADED, cycle=self.cycle,
+                char_count=len(codebase_snapshot),
+            )
+
             # Stage 1: Jim Analysis
             jim_path = _stage_done(1)
             if jim_path:
                 logger.info("--- Stage 1: Jim Analysis --- RESUMED (output exists, skipping)")
+                self.event_bus.emit_simple(EventType.STAGE_SKIPPED, cycle=self.cycle, stage=1)
             else:
                 logger.info("--- Stage 1: Jim Analysis ---")
+                self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=1)
+                _s1_start = time.time()
                 jim_path = stage_1_jim.run(
                     cycle_dir=cycle_dir,
                     config=self.config,
@@ -255,6 +292,11 @@ class Orchestrator:
                     task_description=self.task,
                     cycle_number=self.cycle,
                     previous_results=previous_results,
+                    codebase=codebase_snapshot,
+                )
+                self.event_bus.emit_simple(
+                    EventType.STAGE_COMPLETED, cycle=self.cycle, stage=1,
+                    output_path=str(jim_path), elapsed=round(time.time() - _s1_start, 1),
                 )
             result["stages_completed"].append("jim_analysis")
             result["jim_analysis"] = jim_path.read_text(encoding="utf-8")[:5000]
@@ -263,37 +305,68 @@ class Orchestrator:
             deep_think_path = _stage_done(2)
             if deep_think_path:
                 logger.info("--- Stage 2: Deep Think Verification --- RESUMED (output exists, skipping)")
+                self.event_bus.emit_simple(EventType.STAGE_SKIPPED, cycle=self.cycle, stage=2)
             else:
                 logger.info("--- Stage 2: Deep Think Verification ---")
+                self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=2)
+                _s2_start = time.time()
                 deep_think_path = stage_2_deep_think.run(
                     cycle_dir=cycle_dir,
                     config=self.config,
                     runner=self.runner,
                     jim_analysis_path=jim_path,
                 )
+                self.event_bus.emit_simple(
+                    EventType.STAGE_COMPLETED, cycle=self.cycle, stage=2,
+                    output_path=str(deep_think_path), elapsed=round(time.time() - _s2_start, 1),
+                )
             result["stages_completed"].append("deep_think")
+
+            # Create implementation branch before Stage 3 modifies files.
+            # If stress tests fail, we can cleanly discard the branch.
+            impl_branch = None
+            if self.config.git_checkpoint:
+                impl_branch = self._create_impl_branch(self.cycle)
 
             # Stage 3: Claude Implementation
             impl_path = _stage_done(3)
             if impl_path:
                 logger.info("--- Stage 3: Claude Implementation --- RESUMED (output exists, skipping)")
+                self.event_bus.emit_simple(EventType.STAGE_SKIPPED, cycle=self.cycle, stage=3)
             else:
                 logger.info("--- Stage 3: Claude Implementation ---")
+                self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=3)
+                _s3_start = time.time()
                 impl_path = stage_3_implement.run(
                     cycle_dir=cycle_dir,
                     config=self.config,
                     runner=self.runner,
                     deep_think_path=deep_think_path,
                 )
+                self.event_bus.emit_simple(
+                    EventType.STAGE_COMPLETED, cycle=self.cycle, stage=3,
+                    output_path=str(impl_path), elapsed=round(time.time() - _s3_start, 1),
+                )
             result["stages_completed"].append("claude_implement")
             result["changes_applied"] = impl_path.read_text(encoding="utf-8")[:5000]
+
+            # Reload codebase — Stage 3 modified files on disk
+            codebase_snapshot = load_codebase(self.config)
+            logger.info("Codebase reloaded after Stage 3: %d chars", len(codebase_snapshot))
+            self.event_bus.emit_simple(
+                EventType.CODEBASE_LOADED, cycle=self.cycle,
+                char_count=len(codebase_snapshot), after_stage=3,
+            )
 
             # Stage 4: Claude Self-Review
             review_path = _stage_done(4)
             if review_path:
                 logger.info("--- Stage 4: Claude Self-Review --- RESUMED (output exists, skipping)")
+                self.event_bus.emit_simple(EventType.STAGE_SKIPPED, cycle=self.cycle, stage=4)
             else:
                 logger.info("--- Stage 4: Claude Self-Review ---")
+                self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=4)
+                _s4_start = time.time()
                 review_path = stage_4_review.run(
                     cycle_dir=cycle_dir,
                     config=self.config,
@@ -301,14 +374,21 @@ class Orchestrator:
                     implementation_path=impl_path,
                     deep_think_path=deep_think_path,
                 )
+                self.event_bus.emit_simple(
+                    EventType.STAGE_COMPLETED, cycle=self.cycle, stage=4,
+                    output_path=str(review_path), elapsed=round(time.time() - _s4_start, 1),
+                )
             result["stages_completed"].append("claude_review")
 
             # Stage 5: Consensus (Jim + Claude)
             consensus_path = _stage_done(5)
             if consensus_path:
                 logger.info("--- Stage 5: Consensus --- RESUMED (output exists, skipping)")
+                self.event_bus.emit_simple(EventType.STAGE_SKIPPED, cycle=self.cycle, stage=5)
             else:
                 logger.info("--- Stage 5: Consensus ---")
+                self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=5)
+                _s5_start = time.time()
                 consensus_path = stage_5_consensus.run(
                     cycle_dir=cycle_dir,
                     config=self.config,
@@ -316,6 +396,11 @@ class Orchestrator:
                     claude_review_path=review_path,
                     implementation_path=impl_path,
                     deep_think_path=deep_think_path,
+                    codebase=codebase_snapshot,
+                )
+                self.event_bus.emit_simple(
+                    EventType.STAGE_COMPLETED, cycle=self.cycle, stage=5,
+                    output_path=str(consensus_path), elapsed=round(time.time() - _s5_start, 1),
                 )
             result["stages_completed"].append("consensus")
 
@@ -323,8 +408,11 @@ class Orchestrator:
             fixes_path = _stage_done(6)
             if fixes_path:
                 logger.info("--- Stage 6: Apply Fixes --- RESUMED (output exists, skipping)")
+                self.event_bus.emit_simple(EventType.STAGE_SKIPPED, cycle=self.cycle, stage=6)
             else:
                 logger.info("--- Stage 6: Apply Fixes ---")
+                self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=6)
+                _s6_start = time.time()
                 fixes_path = stage_6_fixes.run(
                     cycle_dir=cycle_dir,
                     config=self.config,
@@ -332,16 +420,35 @@ class Orchestrator:
                     consensus_path=consensus_path,
                     cycle_number=self.cycle,
                 )
+                self.event_bus.emit_simple(
+                    EventType.STAGE_COMPLETED, cycle=self.cycle, stage=6,
+                    output_path=str(fixes_path), elapsed=round(time.time() - _s6_start, 1),
+                )
             result["stages_completed"].append("apply_fixes")
+
+            # Reload codebase — Stage 6 modified files on disk
+            codebase_snapshot = load_codebase(self.config)
+            logger.info("Codebase reloaded after Stage 6: %d chars", len(codebase_snapshot))
+            self.event_bus.emit_simple(
+                EventType.CODEBASE_LOADED, cycle=self.cycle,
+                char_count=len(codebase_snapshot), after_stage=6,
+            )
 
             # Stage 7: Stress Test — NEVER skip. Always re-run to verify current state.
             logger.info("--- Stage 7: Stress Test ---")
+            self.event_bus.emit_simple(EventType.STAGE_STARTED, cycle=self.cycle, stage=7)
+            _s7_start = time.time()
             stress_path = stage_7_stress.run(
                 cycle_dir=cycle_dir,
                 config=self.config,
                 runner=self.runner,
                 implementation_path=impl_path,
                 fixes_path=fixes_path,
+                codebase=codebase_snapshot,
+            )
+            self.event_bus.emit_simple(
+                EventType.STAGE_COMPLETED, cycle=self.cycle, stage=7,
+                output_path=str(stress_path), elapsed=round(time.time() - _s7_start, 1),
             )
             result["stages_completed"].append("stress_test")
             stress_content = stress_path.read_text(encoding="utf-8")
@@ -356,8 +463,7 @@ class Orchestrator:
                 impl_text = impl_path.read_text(encoding="utf-8", errors="replace")
                 cycle_summary_parts.append(f"## Changes Implemented\n{impl_text[:1500]}")
 
-            # 2. What review found (from Stage 4)
-            review_path = cycle_dir / "04-claude-review.md"
+            # 2. What review found (from Stage 4) — reuse existing review_path
             if review_path.exists():
                 review_text = review_path.read_text(encoding="utf-8", errors="replace")
                 # Extract just the ISSUES FOUND section
@@ -365,8 +471,7 @@ class Orchestrator:
                     issues_section = review_text.split("ISSUES FOUND", 1)[1][:1500]
                     cycle_summary_parts.append(f"## Review Issues\n{issues_section}")
 
-            # 3. What consensus decided (from Stage 5)
-            consensus_path = cycle_dir / "05-consensus.md"
+            # 3. What consensus decided (from Stage 5) — reuse existing consensus_path
             if consensus_path.exists():
                 consensus_text = consensus_path.read_text(encoding="utf-8", errors="replace")
                 cycle_summary_parts.append(f"## Consensus\n{consensus_text[:1000]}")
@@ -382,56 +487,12 @@ class Orchestrator:
 
             result["stress_test"] = "\n\n".join(cycle_summary_parts)[:5000]
 
-            # Determine stress test verdict
-            # The stress report has 5 sections separated by "=" * 80.
-            # Look for verdict signals across all sections:
-            # - Pass 1 (structural): "PASS" or "FAIL" at start of line
-            # - Pass 3 (Claude): "OVERALL VERDICT" followed by PASS/FAIL
-            # - Pass 4 (Jim): "NO REGRESSIONS DETECTED" or regression list
-            # - Pass 5 (Token): "TOKEN EFFICIENCY VERDICT" followed by PASS/FAIL
-            stress_lower = stress_content.lower()
-
-            has_structural_fail = False
-            has_claude_fail = False
-            has_jim_fail = False
-            has_token_fail = False
-
-            # Split on section dividers for section-aware parsing
-            sections = stress_content.split("=" * 80)
-
-            for section in sections:
-                sec_lower = section.lower()
-                # Structural pass (Pass 1): check for "fail —" pattern
-                if "structural tests" in sec_lower:
-                    if "fail" in sec_lower.split("syntax check")[-1][:200] if "syntax check" in sec_lower else "":
-                        has_structural_fail = True
-                # Claude functional tests (Pass 3): explicit verdict
-                if "overall verdict" in sec_lower:
-                    verdict_area = sec_lower.split("overall verdict")[-1][:200]
-                    if "fail" in verdict_area:
-                        has_claude_fail = True
-                # Jim regression scan (Pass 4)
-                if "regression scan" in sec_lower:
-                    if "no regressions detected" not in sec_lower:
-                        has_jim_fail = True
-                # Token efficiency audit (Pass 5)
-                if "token efficiency verdict" in sec_lower:
-                    token_verdict_area = sec_lower.split("token efficiency verdict")[-1][:200]
-                    if "fail" in token_verdict_area:
-                        has_token_fail = True
-
-            if has_structural_fail or has_claude_fail or has_token_fail:
-                result["stress_verdict"] = "FAIL"
-            elif has_jim_fail:
-                result["stress_verdict"] = "FAIL"
-            elif "overall verdict" in stress_lower:
-                # Found verdict section and no failures detected
-                result["stress_verdict"] = "PASS"
-            elif "no regressions detected" in stress_lower:
-                result["stress_verdict"] = "PASS"
-            else:
-                # If unclear, assume issues remain
-                result["stress_verdict"] = "UNCLEAR"
+            # Determine stress test verdict via single canonical parser
+            result["stress_verdict"] = self._detect_verdict(stress_content)
+            self.event_bus.emit_simple(
+                EventType.VERDICT, cycle=self.cycle,
+                verdict=result["stress_verdict"],
+            )
 
             # Gather remaining issues for next cycle — failures only, concise
             remaining = []
@@ -446,6 +507,21 @@ class Orchestrator:
                             break
             result["remaining_issues"] = "\n".join(remaining) if remaining else ""
 
+            # Git branch isolation: merge on PASS, revert on FAIL/UNCLEAR
+            if impl_branch and self.config.git_checkpoint:
+                if result["stress_verdict"] == "PASS":
+                    self._merge_impl_branch(impl_branch)
+                    self.event_bus.emit_simple(
+                        EventType.GIT_CHECKPOINT, cycle=self.cycle,
+                        action="merge", branch=impl_branch,
+                    )
+                else:
+                    self._revert_impl_branch(impl_branch)
+                    self.event_bus.emit_simple(
+                        EventType.GIT_CHECKPOINT, cycle=self.cycle,
+                        action="revert", branch=impl_branch,
+                    )
+
         except RunnerError as e:
             error_msg = f"Stage failed: {e}"
             logger.error(error_msg)
@@ -453,6 +529,14 @@ class Orchestrator:
             result["remaining_issues"] = error_msg
             result["stress_verdict"] = "ERROR"
             self.errors.append(f"Cycle {self.cycle}: {error_msg}")
+            self.event_bus.emit_simple(
+                EventType.STAGE_FAILED, cycle=self.cycle,
+                error=error_msg, error_type="RunnerError",
+                stdout=getattr(e, "stdout", ""), stderr=getattr(e, "stderr", ""),
+            )
+            # Revert to base branch on error
+            if impl_branch and self.config.git_checkpoint:
+                self._revert_impl_branch(impl_branch)
 
         except Exception as e:
             error_msg = f"Unexpected error: {type(e).__name__}: {e}"
@@ -461,8 +545,23 @@ class Orchestrator:
             result["remaining_issues"] = error_msg
             result["stress_verdict"] = "ERROR"
             self.errors.append(f"Cycle {self.cycle}: {error_msg}")
+            self.event_bus.emit_simple(
+                EventType.STAGE_FAILED, cycle=self.cycle,
+                error=error_msg, error_type=type(e).__name__,
+            )
+            # Revert to base branch on error
+            if impl_branch and self.config.git_checkpoint:
+                self._revert_impl_branch(impl_branch)
 
         result["finished_at"] = datetime.now().isoformat()
+
+        self.event_bus.emit_simple(
+            EventType.CYCLE_COMPLETED, cycle=self.cycle,
+            verdict=result.get("stress_verdict", "ERROR"),
+            stages_completed=len(result.get("stages_completed", [])),
+            errors=len(result.get("errors", [])),
+        )
+
         return result
 
     # ── Verdict Detection ─────────────────────────────────────────────
@@ -471,9 +570,29 @@ class Orchestrator:
     def _detect_verdict(stress_content: str) -> str:
         """Parse a stress test report and return PASS, FAIL, or UNCLEAR.
 
-        Uses section-aware parsing identical to _run_cycle's verdict logic.
+        Dual strategy:
+        1. JSON-first: Look for machine-readable {"verdict": "PASS"/"FAIL"}
+           blocks emitted by the prompt templates. This eliminates false
+           positives from phrases like "0 files failed" matching substring "fail".
+        2. Keyword fallback: Section-aware parsing with word-boundary matching
+           for backwards compatibility with older reports that lack JSON blocks.
         """
-        stress_lower = stress_content.lower()
+        # ── Strategy 1: JSON verdict blocks (highest confidence) ──────
+        # Find all {"verdict": "..."} blocks in the report.
+        json_verdicts = re.findall(
+            r'\{\s*"verdict"\s*:\s*"(PASS|FAIL)"\s*\}',
+            stress_content,
+            re.IGNORECASE,
+        )
+        if json_verdicts:
+            # If ANY section reports FAIL, the overall verdict is FAIL
+            normalized = [v.upper() for v in json_verdicts]
+            if "FAIL" in normalized:
+                return "FAIL"
+            return "PASS"
+
+        # ── Strategy 2: Keyword fallback (word boundaries) ────────────
+        # Used for reports generated before the JSON verdict requirement.
         sections = stress_content.split("=" * 80)
 
         has_structural_fail = False
@@ -483,25 +602,31 @@ class Orchestrator:
 
         for section in sections:
             sec_lower = section.lower()
+            # Structural pass (Pass 1): look for word-boundary "fail"
             if "structural tests" in sec_lower and "syntax check" in sec_lower:
-                if "fail" in sec_lower.split("syntax check")[-1][:200]:
+                after_syntax = sec_lower.split("syntax check")[-1][:200]
+                if re.search(r'\bfail\b', after_syntax):
                     has_structural_fail = True
+            # Claude functional tests (Pass 3): explicit verdict
             if "overall verdict" in sec_lower:
                 verdict_area = sec_lower.split("overall verdict")[-1][:200]
-                if "fail" in verdict_area:
+                if re.search(r'\bfail\b', verdict_area):
                     has_claude_fail = True
+            # Jim regression scan (Pass 4)
             if "regression scan" in sec_lower:
                 if "no regressions detected" not in sec_lower:
                     has_jim_fail = True
+            # Token efficiency audit (Pass 5)
             if "token efficiency verdict" in sec_lower:
                 token_area = sec_lower.split("token efficiency verdict")[-1][:200]
-                if "fail" in token_area:
+                if re.search(r'\bfail\b', token_area):
                     has_token_fail = True
 
         if has_structural_fail or has_claude_fail or has_token_fail:
             return "FAIL"
         if has_jim_fail:
             return "FAIL"
+        stress_lower = stress_content.lower()
         if "overall verdict" in stress_lower:
             return "PASS"
         if "no regressions detected" in stress_lower:
@@ -564,21 +689,39 @@ class Orchestrator:
             self.config.git_checkpoint = False
 
     def _git_checkpoint(self, message: str):
-        """Commit current state as a checkpoint."""
+        """Commit current state as a checkpoint.
+
+        Uses `git add .` to capture NEW files created during implementation
+        (not just modified tracked files). Sensitive files are unstaged after
+        the broad add to prevent accidental secret leaks.
+        """
+        cwd = str(self.config.target_project)
         try:
-            # Stage tracked changes (avoids accidentally committing .env or secrets)
+            # Stage ALL changes including new files
             subprocess.run(
-                ["git", "add", "-u"],
+                ["git", "add", "."],
                 capture_output=True,
-                cwd=str(self.config.target_project),
+                cwd=cwd,
                 check=True,
             )
+            # Unstage sensitive files that should never be committed.
+            # git reset on non-existent paths is a no-op, so this is safe.
+            _SENSITIVE_PATTERNS = [
+                ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+                "credentials.*", "secrets.*", "*.secret",
+            ]
+            for pattern in _SENSITIVE_PATTERNS:
+                subprocess.run(
+                    ["git", "reset", "HEAD", "--", pattern],
+                    capture_output=True,
+                    cwd=cwd,
+                )
             # Commit (might fail if nothing to commit — that's fine)
             result = subprocess.run(
                 ["git", "commit", "-m", message, "--allow-empty"],
                 capture_output=True,
                 text=True,
-                cwd=str(self.config.target_project),
+                cwd=cwd,
             )
             if result.returncode == 0:
                 logger.info("Git checkpoint: %s", message)
@@ -586,6 +729,106 @@ class Orchestrator:
                 logger.debug("Git commit skipped (no changes or error)")
         except Exception as e:
             logger.warning("Git checkpoint failed: %s", e)
+
+    # ── Branch Isolation ──────────────────────────────────────────────
+
+    def _create_impl_branch(self, cycle: int) -> str:
+        """Create an implementation branch for this cycle.
+
+        Stages 3-7 run on this branch. If stress tests pass, the branch
+        is merged back. If they fail, it can be cleanly discarded without
+        polluting the base branch with broken code.
+
+        Returns the branch name.
+        """
+        branch_name = f"forge/cycle-{cycle}-impl"
+        cwd = str(self.config.target_project)
+        try:
+            # Commit any pending changes on the base branch first
+            self._git_checkpoint(f"forge: pre-impl snapshot cycle {cycle}")
+            # Create and switch to implementation branch
+            subprocess.run(
+                ["git", "checkout", "-b", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                check=True,
+            )
+            logger.info("Git: created impl branch %s", branch_name)
+        except subprocess.CalledProcessError:
+            # Branch may already exist from a resume — switch to it
+            switch = subprocess.run(
+                ["git", "checkout", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+            )
+            if switch.returncode != 0:
+                logger.warning(
+                    "Git: failed to switch to existing impl branch %s: %s",
+                    branch_name, switch.stderr.strip(),
+                )
+            else:
+                logger.info("Git: resumed on existing impl branch %s", branch_name)
+        return branch_name
+
+    def _merge_impl_branch(self, branch_name: str):
+        """Merge a successful implementation branch back to the pipeline branch."""
+        cwd = str(self.config.target_project)
+        try:
+            self._git_checkpoint(f"forge: impl complete on {branch_name}")
+            subprocess.run(
+                ["git", "checkout", self.config.pipeline_branch],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "merge", "--no-ff", "-m",
+                 f"forge: merge {branch_name} (stress test PASS)", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                check=True,
+            )
+            logger.info("Git: merged %s into %s", branch_name, self.config.pipeline_branch)
+        except subprocess.CalledProcessError as e:
+            logger.warning("Git merge failed: %s — staying on impl branch", e)
+
+    def _revert_impl_branch(self, branch_name: str):
+        """Discard a failed implementation branch, return to pipeline branch.
+
+        Critically: resets the working directory after switching branches.
+        Without this, uncommitted changes from the failed implementation
+        would leak to the pipeline branch via the dirty working tree.
+        """
+        cwd = str(self.config.target_project)
+        try:
+            # First, discard any uncommitted changes on the impl branch
+            # so git checkout doesn't carry them to the base branch.
+            subprocess.run(
+                ["git", "checkout", "--", "."],
+                capture_output=True,
+                cwd=cwd,
+            )
+            subprocess.run(
+                ["git", "clean", "-fd"],
+                capture_output=True,
+                cwd=cwd,
+            )
+            # Now switch to the pipeline branch with a clean working tree
+            subprocess.run(
+                ["git", "checkout", self.config.pipeline_branch],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                check=True,
+            )
+            logger.info("Git: reverted to %s (discarding %s)",
+                         self.config.pipeline_branch, branch_name)
+        except subprocess.CalledProcessError as e:
+            logger.warning("Git revert failed: %s", e)
 
     # ── Morning Report ────────────────────────────────────────────────
 

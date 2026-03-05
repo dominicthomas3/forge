@@ -1,9 +1,10 @@
 [project]
 name = "forge"
-version = "0.1.0"
+version = "0.0.1"
 requires-python = ">=3.11"
-dependencies = ["google-genai", "python-dotenv"]
+dependencies = ["google-genai", "python-dotenv", "nicegui>=2.0", "httpx>=0.27", "pywebview>=5.0"]
 
 [project.scripts]
 forge = "forge.run_overnight:main"
 morpheus = "forge.run_morpheus:main"
+forge-dashboard = "forge.run_dashboard:main"

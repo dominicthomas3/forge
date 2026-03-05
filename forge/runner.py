@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
+import signal
 import subprocess
 import threading
 import time
@@ -94,6 +96,16 @@ class Runner:
             key_upper = key.upper()
             if key_upper == "CLAUDECODE" or key_upper.startswith("CLAUDE_CODE_"):
                 del clean_env[key]
+
+        # Create a new process group so we can kill the entire tree on timeout.
+        # Without this, child processes (node, python subprocesses) survive
+        # proc.kill() and leak as orphans.
+        popen_kwargs: dict = {}
+        if platform.system() == "Windows":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -104,6 +116,7 @@ class Runner:
             env=clean_env,
             encoding="utf-8",
             errors="replace",
+            **popen_kwargs,
         )
 
         # ── I/O threads to prevent pipe-buffer deadlock ──
@@ -141,7 +154,9 @@ class Runner:
         start = time.time()
         warned_slow = False
         warned_stall = False
-        poll_interval = 5  # seconds between checks
+        poll_interval = 0.1  # Start fast, ramp up (adaptive polling)
+        poll_max = 5.0       # Cap at 5s for long-running processes
+        poll_multiplier = 1.5
         last_log_time = start
 
         while True:
@@ -189,7 +204,7 @@ class Runner:
                     "[%s] HARD TIMEOUT — killing process after %.0fs (limit: %ds)",
                     stage_name, elapsed, timeout,
                 )
-                proc.kill()
+                self._kill_process_tree(proc)
                 stdout_thread.join(timeout=5)
                 stderr_thread.join(timeout=5)
                 stdout = "".join(stdout_chunks)
@@ -199,6 +214,33 @@ class Runner:
                 )
 
             time.sleep(poll_interval)
+            # Adaptive: ramp up interval so fast ops finish in <1s
+            # but long-running processes don't burn CPU spinning.
+            poll_interval = min(poll_interval * poll_multiplier, poll_max)
+
+    @staticmethod
+    def _kill_process_tree(proc: subprocess.Popen) -> None:
+        """Kill a process and all its children (the entire process tree).
+
+        On Windows, uses `taskkill /F /T /PID` which kills the tree.
+        On Unix, uses `os.killpg` to signal the whole process group.
+        Falls back to `proc.kill()` if tree kill fails.
+        """
+        try:
+            if platform.system() == "Windows":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            # Fallback: at least kill the root process
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     # ── Gemini CLI (Jim) ──────────────────────────────────────────────────
 
