@@ -927,8 +927,11 @@ class ForgeDashboard:
 
     @staticmethod
     def _close_window() -> None:
-        """Cleanly shut down the app (no browser confirmation dialog)."""
-        app.shutdown()
+        """Cleanly shut down: destroy window → triggers on_shutdown → os._exit(0)."""
+        if app.native.main_window:
+            app.native.main_window.destroy()
+        else:
+            app.shutdown()
 
     # ── Event Handling ───────────────────────────────────────────────────
 

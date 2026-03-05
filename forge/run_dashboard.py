@@ -18,7 +18,11 @@ import argparse
 import asyncio
 import logging
 import os
+import platform
+import socket
+import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +55,46 @@ def setup_logging(forge_data_dir: Path) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
     root.addHandler(file_handler)
+
+
+def ensure_port_available(port: int) -> None:
+    """Kill any zombie process holding the port from a previous run."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        result = sock.connect_ex(("127.0.0.1", port))
+    finally:
+        sock.close()
+    if result != 0:
+        return  # Port is free
+
+    print(f"  [CLEANUP] Port {port} is in use — killing stale process...")
+    if platform.system() == "Windows":
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in out.stdout.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", pid],
+                        capture_output=True, timeout=5,
+                    )
+                    print(f"  [CLEANUP] Killed PID {pid}")
+                    time.sleep(2)
+                    break
+        except Exception as e:
+            print(f"  [CLEANUP] Warning: {e}")
+    else:
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True, timeout=5,
+            )
+            time.sleep(2)
+        except Exception:
+            pass
 
 
 def main():
@@ -134,6 +178,9 @@ Examples:
     # Setup logging
     setup_logging(config.forge_data_dir)
 
+    # ── Kill zombie processes from previous runs ─────────────────────
+    ensure_port_available(args.port)
+
     # Validate live mode requirements
     task_description = None
     if args.mode == "live":
@@ -150,11 +197,20 @@ Examples:
     from forge.dashboard import ForgeDashboard, attach_log_handler
     from forge.events import EventBus
 
-    # Native window config (must be set before ui.run)
+    # ── pywebview native window config (must be set before ui.run) ───
     app.native.window_args['resizable'] = True
     app.native.window_args['min_size'] = (900, 600)
-    app.native.window_args['easy_drag'] = True  # drag from any non-interactive area
-    app.native.start_args['private_mode'] = False  # enables font caching in pywebview
+    app.native.window_args['easy_drag'] = True
+    app.native.window_args['confirm_close'] = False  # no "are you sure?" dialog
+
+    # Force EdgeChromium (WebView2) renderer on Windows for proper WebSocket support.
+    # MSHTML (IE) fallback does NOT support WebSocket reliably.
+    app.native.start_args['private_mode'] = False  # enables font caching
+    if platform.system() == "Windows":
+        app.native.start_args['gui'] = 'edgechromium'
+
+    # ── Clean shutdown: when window closes, kill the server ──────────
+    app.on_shutdown(lambda: os._exit(0))
 
     # Build the dashboard
     event_bus = EventBus() if args.mode == "live" else None
@@ -212,7 +268,7 @@ Examples:
     # Launch NiceGUI as a native desktop window (pywebview)
     # native=True renders in a real OS window, not a browser tab
     # frameless=True removes OS chrome — custom title bar provides controls
-    # reconnect_timeout=30.0 fixes "connection lost" flicker
+    # reconnect_timeout=30.0 fixes "connection lost" flicker on initial load
     # storage_secret enables session persistence across reconnects
     # on_air=None prevents NiceGUI from attempting external connectivity
     ui.run(
