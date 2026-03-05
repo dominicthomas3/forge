@@ -141,6 +141,11 @@ def main() -> None:
         process = subprocess.run(cmd, env=env)
         elapsed = time.time() - start_time
 
+        # Exit code 2 = user closed the window → stop watchdog
+        if process.returncode == 2:
+            print("[watchdog] User closed the application. Stopping.")
+            break
+
         if process.returncode == 0:
             # Clean exit (intentional restart for update)
             now = time.time()

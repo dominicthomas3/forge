@@ -205,7 +205,7 @@ Examples:
     # ── pywebview native window config (must be set before ui.run) ───
     app.native.window_args['resizable'] = True
     app.native.window_args['min_size'] = (900, 600)
-    app.native.window_args['easy_drag'] = True
+    app.native.window_args['easy_drag'] = False  # True eats ALL click events
     app.native.window_args['confirm_close'] = False  # no "are you sure?" dialog
 
     # Force EdgeChromium (WebView2) renderer on Windows for proper WebSocket support.
@@ -215,9 +215,11 @@ Examples:
         app.native.start_args['gui'] = 'edgechromium'
 
     # ── Clean shutdown: when window closes, kill the server ──────────
+    # Exit code 2 = user-initiated close (watchdog should NOT restart)
+    # Exit code 0 = update restart (watchdog SHOULD restart)
     def _graceful_exit():
         logging.shutdown()
-        os._exit(0)  # Hard exit after flushing logs — NiceGUI server won't stop otherwise
+        os._exit(2)  # Exit code 2 → user close, watchdog won't restart
 
     app.on_shutdown(_graceful_exit)
 

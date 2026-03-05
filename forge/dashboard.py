@@ -369,6 +369,19 @@ body::after {{
     animation: forge-spin 1s linear infinite;
 }}
 
+/* Frameless window drag region — title bar only */
+.forge-titlebar {{
+    -webkit-app-region: drag;
+}}
+.forge-titlebar .q-btn,
+.forge-titlebar button,
+.forge-titlebar a,
+.forge-titlebar input,
+.forge-titlebar select,
+.forge-no-drag {{
+    -webkit-app-region: no-drag;
+}}
+
 /* Title bar buttons */
 .forge-title-btn {{
     width: 32px;
@@ -548,8 +561,8 @@ class ForgeDashboard:
         with ui.header().classes("q-pa-none").style(
             f"height: auto; background: {FORGE_BG} !important;"
         ):
-            # Top row: logo + info + controls
-            with ui.row().classes("w-full items-center no-wrap q-px-md").style(
+            # Top row: logo + info + controls (forge-titlebar enables drag)
+            with ui.row().classes("w-full items-center no-wrap q-px-md forge-titlebar").style(
                 f"height: 40px; border-bottom: 1px solid {FORGE_BORDER};"
             ):
                 # Left: THE FORGE
