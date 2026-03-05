@@ -145,10 +145,16 @@ Examples:
             parser.error("Live mode requires --task or --task-file")
 
     # Late imports — NiceGUI takes a moment to initialize
-    from nicegui import ui
+    from nicegui import app, ui
 
     from forge.dashboard import ForgeDashboard, attach_log_handler
     from forge.events import EventBus
+
+    # Native window config (must be set before ui.run)
+    app.native.window_args['resizable'] = True
+    app.native.window_args['min_size'] = (900, 600)
+    app.native.window_args['easy_drag'] = True  # drag from any non-interactive area
+    app.native.start_args['private_mode'] = False  # enables font caching in pywebview
 
     # Build the dashboard
     event_bus = EventBus() if args.mode == "live" else None
@@ -205,7 +211,7 @@ Examples:
 
     # Launch NiceGUI as a native desktop window (pywebview)
     # native=True renders in a real OS window, not a browser tab
-    # frameless=True lets our custom title bar be the only chrome
+    # frameless=True removes OS chrome — custom title bar provides controls
     # reconnect_timeout=30.0 fixes "connection lost" flicker
     # storage_secret enables session persistence across reconnects
     # on_air=None prevents NiceGUI from attempting external connectivity

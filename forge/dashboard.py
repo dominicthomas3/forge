@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nicegui import ui
+from nicegui import app, ui
 
 from forge.config import ForgeConfig
 from forge.events import STAGE_NAMES, EventBus, EventType, ForgeEvent
@@ -42,13 +42,13 @@ FORGE_TEXT = "#E0E0E0"
 FORGE_TEXT_DIM = "#666666"
 
 STAGE_LIST = [
-    (1, "JIM", "Jim Analysis", "mdi-brain"),
-    (2, "DEEP", "Deep Think", "mdi-lightbulb-on"),
-    (3, "IMPL", "Claude Implement", "mdi-code-braces"),
-    (4, "REV", "Claude Review", "mdi-magnify-scan"),
-    (5, "CONS", "Consensus", "mdi-handshake"),
-    (6, "FIX", "Apply Fixes", "mdi-wrench"),
-    (7, "TEST", "Stress Test", "mdi-shield-check"),
+    (1, "JIM", "Jim Analysis", "psychology"),
+    (2, "DEEP", "Deep Think", "lightbulb"),
+    (3, "IMPL", "Claude Implement", "code"),
+    (4, "REV", "Claude Review", "search"),
+    (5, "CONS", "Consensus", "handshake"),
+    (6, "FIX", "Apply Fixes", "build"),
+    (7, "TEST", "Stress Test", "verified_user"),
 ]
 
 # ── CSS Theme ────────────────────────────────────────────────────────────────
@@ -72,10 +72,16 @@ FORGE_CSS = f"""
 }}
 
 * {{
-    font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace !important;
     border-radius: 0 !important;
 }}
+body {{
+    font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace !important;
+}}
 
+html, body {{
+    height: 100vh !important;
+    margin: 0 !important;
+}}
 body {{
     background: var(--forge-bg) !important;
     color: var(--forge-text) !important;
@@ -83,6 +89,9 @@ body {{
         linear-gradient(rgba(255,140,0,0.03) 1px, transparent 1px),
         linear-gradient(90deg, rgba(255,140,0,0.03) 1px, transparent 1px) !important;
     background-size: 40px 40px !important;
+}}
+.q-page {{
+    overflow-y: auto !important;
 }}
 
 /* Scanline overlay */
@@ -99,6 +108,39 @@ body::after {{
         rgba(0,0,0,0.04) 2px,
         rgba(0,0,0,0.04) 4px
     );
+}}
+
+/* Force ALL Quasar elements orange — no blue anywhere */
+:root {{
+    --q-primary: {FORGE_PRIMARY} !important;
+}}
+.q-btn {{
+    color: var(--forge-primary) !important;
+}}
+.q-btn .q-icon {{
+    color: var(--forge-primary) !important;
+}}
+.q-field__native, .q-field__input {{
+    color: var(--forge-text) !important;
+}}
+.q-field--focused .q-field__control {{
+    border-color: var(--forge-primary) !important;
+}}
+.q-field__bottom {{
+    color: var(--forge-text-dim) !important;
+}}
+.q-focus-helper {{
+    background: var(--forge-primary) !important;
+    opacity: 0.1 !important;
+}}
+.q-tabs__indicator {{
+    background: var(--forge-primary) !important;
+}}
+.q-expansion-item__toggle-icon {{
+    color: var(--forge-primary) !important;
+}}
+.text-primary {{
+    color: var(--forge-primary) !important;
 }}
 
 /* Override Quasar/NiceGUI defaults */
@@ -322,8 +364,8 @@ body::after {{
     to {{ transform: rotate(360deg); }}
 }}
 
-/* Spinning loader icon (mdi-loading doesn't auto-spin in Quasar) */
-.q-icon[class*="mdi-loading"] {{
+/* Spinning loader icon */
+.forge-spin-icon {{
     animation: forge-spin 1s linear infinite;
 }}
 
@@ -350,6 +392,8 @@ body::after {{
     background: var(--forge-fail);
     border-color: var(--forge-fail);
 }}
+
+/* Window drag handled by pywebview easy_drag — no CSS drag regions needed */
 
 /* Cycle history row */
 .forge-cycle-row {{
@@ -431,14 +475,6 @@ body::after {{
     padding: 12px;
 }}
 
-/* Native window: make title bar draggable */
-.forge-titlebar {{
-    -webkit-app-region: drag;
-}}
-.forge-titlebar button,
-.forge-titlebar .no-drag {{
-    -webkit-app-region: no-drag;
-}}
 """
 
 
@@ -513,7 +549,7 @@ class ForgeDashboard:
             f"height: auto; background: {FORGE_BG} !important;"
         ):
             # Top row: logo + info + controls
-            with ui.row().classes("w-full items-center no-wrap q-px-md forge-titlebar").style(
+            with ui.row().classes("w-full items-center no-wrap q-px-md").style(
                 f"height: 40px; border-bottom: 1px solid {FORGE_BORDER};"
             ):
                 # Left: THE FORGE
@@ -544,24 +580,28 @@ class ForgeDashboard:
 
                 # Right: window controls
                 ui.button(
-                    icon="mdi-cog",
+                    icon="settings",
                     on_click=lambda: self._settings_drawer.toggle(),
-                ).props("flat dense size=sm").style(
-                    f"color: {FORGE_TEXT_DIM};"
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
                 ).tooltip("Configuration")
                 ui.button(
-                    icon="mdi-window-minimize",
-                    on_click=lambda: ui.run_javascript("window.minimize && window.minimize()"),
-                ).props("flat dense size=sm").style(
-                    f"color: {FORGE_TEXT_DIM};"
+                    icon="remove",
+                    on_click=lambda: self._minimize_window(),
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
                 ).tooltip("Minimize")
                 ui.button(
-                    icon="mdi-close",
-                    on_click=lambda: ui.run_javascript(
-                        "if(confirm('Close The Forge?')) window.close()"
-                    ),
-                ).props("flat dense size=sm").style(
-                    f"color: {FORGE_TEXT_DIM};"
+                    icon="crop_square",
+                    on_click=lambda: self._maximize_window(),
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
+                ).tooltip("Maximize")
+                ui.button(
+                    icon="close",
+                    on_click=lambda: self._close_window(),
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
                 ).tooltip("Close")
 
         # ── Settings Drawer ───────────────────────────────────────
@@ -579,12 +619,12 @@ class ForgeDashboard:
             f'active-color="{FORGE_PRIMARY}" indicator-color="{FORGE_PRIMARY}" '
             f'dense align="left"'
         ) as tabs:
-            live_tab = ui.tab("LIVE", icon="mdi-play-circle")
-            history_tab = ui.tab("HISTORY", icon="mdi-history")
-            report_tab = ui.tab("REPORT", icon="mdi-file-document")
+            live_tab = ui.tab("LIVE", icon="play_circle")
+            history_tab = ui.tab("HISTORY", icon="history")
+            report_tab = ui.tab("REPORT", icon="description")
 
         # ── Tab Panels ────────────────────────────────────────────
-        with ui.tab_panels(tabs, value=live_tab).classes("w-full").props("animated").style(
+        with ui.tab_panels(tabs, value=live_tab).classes("w-full").style(
             f"background: transparent;"
         ):
             with ui.tab_panel(live_tab).classes("q-pa-sm"):
@@ -722,7 +762,7 @@ class ForgeDashboard:
                 ui.space()
                 ui.button(
                     "REFRESH",
-                    icon="mdi-refresh",
+                    icon="refresh",
                     on_click=self._refresh_history,
                 ).props("flat dense size=sm").style(
                     f"color: {FORGE_PRIMARY}; font-size: 10px; letter-spacing: 0.1em;"
@@ -732,7 +772,9 @@ class ForgeDashboard:
                 options=[],
                 label="Select Cycle",
                 on_change=lambda e: self._load_history_cycle(e.value),
-            ).classes("w-64").style(f"color: {FORGE_TEXT};")
+            ).classes("w-64").props("dark dense options-dark").style(
+                f"color: {FORGE_TEXT};"
+            )
 
             self._history_output = ui.column().classes("w-full q-mt-md")
 
@@ -747,7 +789,7 @@ class ForgeDashboard:
                 ui.space()
                 ui.button(
                     "REFRESH",
-                    icon="mdi-refresh",
+                    icon="refresh",
                     on_click=self._refresh_report,
                 ).props("flat dense size=sm").style(
                     f"color: {FORGE_PRIMARY}; font-size: 10px; letter-spacing: 0.1em;"
@@ -768,7 +810,7 @@ class ForgeDashboard:
                 )
                 ui.space()
                 ui.button(
-                    icon="mdi-close",
+                    icon="close",
                     on_click=lambda: self._settings_drawer.toggle(),
                 ).props("flat dense size=sm").style(f"color: {FORGE_TEXT_DIM};")
 
@@ -868,6 +910,25 @@ class ForgeDashboard:
             f'<span style="font-size:11px; color:{FORGE_TEXT};">{value}</span>'
             f'</span>'
         )
+
+    # ── Window Controls ────────────────────────────────────────────────
+
+    @staticmethod
+    def _minimize_window() -> None:
+        """Minimize the native window via pywebview WindowProxy."""
+        if app.native.main_window:
+            app.native.main_window.minimize()
+
+    @staticmethod
+    def _maximize_window() -> None:
+        """Toggle maximize/restore on the native window."""
+        if app.native.main_window:
+            app.native.main_window.toggle_fullscreen()
+
+    @staticmethod
+    def _close_window() -> None:
+        """Cleanly shut down the app (no browser confirmation dialog)."""
+        app.shutdown()
 
     # ── Event Handling ───────────────────────────────────────────────────
 
@@ -1010,7 +1071,8 @@ class ForgeDashboard:
         if state == "running":
             node.classes(add="stage-active")
             if icon_el:
-                icon_el.props("name=mdi-loading")
+                icon_el.props("name=hourglass_empty")
+                icon_el.classes(add="forge-spin-icon")
                 icon_el._style["color"] = FORGE_PRIMARY  # ObservableDict auto-updates
             if time_el:
                 time_el._props["innerHTML"] = (
@@ -1026,7 +1088,8 @@ class ForgeDashboard:
         elif state == "completed":
             node.classes(add="stage-completed")
             if icon_el:
-                icon_el.props("name=mdi-check")
+                icon_el.props("name=check")
+                icon_el.classes(remove="forge-spin-icon")
                 icon_el._style["color"] = FORGE_ACCENT  # ObservableDict auto-updates
             if time_el:
                 time_el._props["innerHTML"] = (
@@ -1042,7 +1105,8 @@ class ForgeDashboard:
         elif state == "failed":
             node.classes(add="stage-failed")
             if icon_el:
-                icon_el.props("name=mdi-close")
+                icon_el.props("name=close")
+                icon_el.classes(remove="forge-spin-icon")
                 icon_el._style["color"] = FORGE_FAIL  # ObservableDict auto-updates
             if time_el:
                 time_el._props["innerHTML"] = (
@@ -1053,7 +1117,8 @@ class ForgeDashboard:
         elif state == "skipped":
             node.classes(add="stage-skipped")
             if icon_el:
-                icon_el.props("name=mdi-skip-next")
+                icon_el.props("name=skip_next")
+                icon_el.classes(remove="forge-spin-icon")
                 icon_el._style["color"] = FORGE_WARN  # ObservableDict auto-updates
             if time_el:
                 time_el._props["innerHTML"] = (
@@ -1065,6 +1130,7 @@ class ForgeDashboard:
             stage_info = STAGE_LIST[stage - 1]
             if icon_el:
                 icon_el.props(f"name={stage_info[3]}")
+                icon_el.classes(remove="forge-spin-icon")
                 icon_el._style["color"] = FORGE_TEXT_DIM  # ObservableDict auto-updates
             if time_el:
                 time_el._props["innerHTML"] = (
@@ -1138,7 +1204,7 @@ class ForgeDashboard:
         with self._error_container:
             with ui.element("div").classes("forge-error-panel"):
                 with ui.row().classes("items-center gap-sm"):
-                    ui.icon("mdi-alert-circle", size="xs").style(
+                    ui.icon("error", size="xs").style(
                         f"color: {FORGE_FAIL};"
                     )
                     stage_name = STAGE_NAMES.get(event.stage or 0, "Unknown")
@@ -1163,7 +1229,7 @@ class ForgeDashboard:
 
                 stderr = event.data.get("stderr", "")
                 if stderr:
-                    with ui.expansion("STDERR", icon="mdi-console").style(
+                    with ui.expansion("STDERR", icon="terminal").style(
                         f"color: {FORGE_TEXT_DIM}; font-size:10px;"
                     ):
                         ui.code(stderr[:5000], language="text").style(
