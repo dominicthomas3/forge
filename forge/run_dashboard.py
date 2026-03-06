@@ -122,6 +122,7 @@ class _WindowApi:
 
     def __init__(self) -> None:
         self._window: Any = None
+        self._maximized: bool = False
 
     def close(self) -> None:
         if self._window:
@@ -133,7 +134,15 @@ class _WindowApi:
 
     def maximize(self) -> None:
         if self._window:
-            self._window.toggle_fullscreen()
+            try:
+                if self._maximized:
+                    self._window.restore()
+                else:
+                    self._window.maximize()
+                self._maximized = not self._maximized
+            except AttributeError:
+                # Fallback for older pywebview without maximize/restore
+                self._window.toggle_fullscreen()
 
 
 def _find_edge_binary() -> str | None:
@@ -332,45 +341,59 @@ Examples:
     print("=" * 60)
     print()
 
-    # ── Try native pywebview frameless window ────────────────────────
-    # Strategy: run NiceGUI server in a daemon thread, pywebview on
-    # the main thread. This bypasses NiceGUI's broken native mode
-    # (multiprocessing + easy_drag issues) while giving us a real
-    # frameless window with custom buttons.
-    use_native = True
+    # ── Launch mode: pywebview (frameless) or Edge app (fallback) ────
+    #
+    # pywebview gives a TRUE frameless window with custom title bar.
+    # Edge app mode shows a native title bar (can't remove it).
+    # We ALWAYS try pywebview first.
+
     try:
         import webview
-    except ImportError:
-        print("  [INFO] pywebview not installed — using Edge app mode")
-        use_native = False
-
-    if use_native:
-        # Start NiceGUI server in a daemon thread
-        def _run_server():
-            ui.run(
-                title="The Forge",
-                host="127.0.0.1",
-                port=port,
-                reload=False,
-                show=False,
-                dark=True,
-                native=False,         # Server only — no pywebview from NiceGUI
-                reconnect_timeout=30.0,
-                storage_secret=os.environ.get(
-                    "FORGE_SESSION_SECRET", f"forge-session-{os.getpid()}"
-                ),
-                on_air=None,
-            )
-
-        server_thread = threading.Thread(target=_run_server, daemon=True)
-        server_thread.start()
-
+        has_pywebview = True
+        _wv_ver = "?"
         try:
-            _wait_for_server(port)
+            from importlib.metadata import version as _pkg_version
+            _wv_ver = _pkg_version("pywebview")
+        except Exception:
+            pass
+        print(f"  [NATIVE] pywebview {_wv_ver} found")
+    except ImportError:
+        has_pywebview = False
+        print("  [WARN] pywebview not installed — buttons may not fully work")
+        print("         Install with: pip install pywebview")
+
+    # Start NiceGUI server in a daemon thread
+    def _run_server():
+        ui.run(
+            title="The Forge",
+            host="127.0.0.1",
+            port=port,
+            reload=False,
+            show=False,
+            dark=True,
+            native=False,         # Server only — no NiceGUI native mode
+            reconnect_timeout=30.0,
+            storage_secret=os.environ.get(
+                "FORGE_SESSION_SECRET", f"forge-session-{os.getpid()}"
+            ),
+            on_air=None,
+        )
+
+    server_thread = threading.Thread(target=_run_server, daemon=True)
+    server_thread.start()
+
+    try:
+        _wait_for_server(port)
+    except RuntimeError as e:
+        print(f"  [ERROR] {e}")
+        sys.exit(1)
+
+    if has_pywebview:
+        try:
             print("  [NATIVE] Server ready, opening frameless window...")
 
-            # Configure pywebview for selective drag (title bar only)
-            webview.DRAG_REGION_DIRECT_TARGET_ONLY = True
+            # Drag region is handled by a dedicated empty div in dashboard.py
+            # (no child elements = no click interception issues)
 
             api = _WindowApi()
             window = webview.create_window(
@@ -385,6 +408,7 @@ Examples:
             )
             api._window = window
 
+            print("  [NATIVE] Frameless window created, starting...")
             # Blocks until user closes the window
             webview.start(private_mode=False, gui="edgechromium")
 
@@ -393,9 +417,9 @@ Examples:
 
         except Exception as e:
             print(f"  [NATIVE] pywebview failed: {e}")
-            print("  [NATIVE] Falling back to Edge app mode...")
+            print(f"  [NATIVE] Falling back to Edge app mode.")
+            print(f"           (Native title bar will show — this is an Edge limitation)")
             _launch_edge_fallback(port)
-            # Keep main thread alive for the server
             try:
                 while server_thread.is_alive():
                     server_thread.join(timeout=1)
@@ -403,22 +427,15 @@ Examples:
                 print("\n  Shutting down...")
                 sys.exit(0)
     else:
-        # ── Edge/Chrome app mode fallback ────────────────────────────
-        app.on_startup(lambda: _launch_edge_fallback(port))
-        ui.run(
-            title="The Forge",
-            host="127.0.0.1",
-            port=port,
-            reload=False,
-            show=False,
-            dark=True,
-            native=False,
-            reconnect_timeout=30.0,
-            storage_secret=os.environ.get(
-                "FORGE_SESSION_SECRET", f"forge-session-{os.getpid()}"
-            ),
-            on_air=None,
-        )
+        # ── Edge/Chrome app mode (no pywebview) ──────────────────────
+        print("  [EDGE] Opening Edge app window...")
+        _launch_edge_fallback(port)
+        try:
+            while server_thread.is_alive():
+                server_thread.join(timeout=1)
+        except KeyboardInterrupt:
+            print("\n  Shutting down...")
+            sys.exit(0)
 
 
 if __name__ == "__main__":

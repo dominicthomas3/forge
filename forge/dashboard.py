@@ -79,17 +79,17 @@ body {{
 }}
 
 html, body {{
-    height: 100vh !important;
+    height: 100% !important;
     overflow: hidden !important;
     margin: 0 !important;
+    padding: 0 !important;
 }}
 .nicegui-content {{
-    height: 100vh !important;
+    height: 100% !important;
     overflow: hidden !important;
 }}
-.q-page-container {{
-    height: calc(100vh - 40px - 28px) !important;
-    overflow-y: auto !important;
+.q-layout {{
+    height: 100vh !important;
 }}
 body {{
     background: var(--forge-bg) !important;
@@ -108,8 +108,8 @@ body::after {{
     content: '';
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
-    pointer-events: none;
-    z-index: 9999;
+    pointer-events: none !important;
+    z-index: 10;
     background: repeating-linear-gradient(
         0deg,
         transparent,
@@ -533,14 +533,17 @@ class ForgeDashboard:
         with ui.header().classes("q-pa-none").style(
             f"height: auto; background: {FORGE_BG} !important;"
         ):
-            # Top row: logo + info + controls
-            # pywebview-drag-region makes this row draggable in frameless mode.
-            # DRAG_REGION_DIRECT_TARGET_ONLY ensures only the row background
-            # triggers drag — child elements (buttons, labels) stay clickable.
+            # Thin drag strip at very top — ONLY this element has drag region.
+            # Keeps it separate from buttons so clicks are never intercepted.
+            ui.element("div").classes("pywebview-drag-region").style(
+                f"height: 6px; width: 100%; background: {FORGE_BG};"
+                f"cursor: default; flex-shrink: 0;"
+            )
+            # Toolbar row — NO drag region class, so ALL buttons are clickable.
             with ui.row().classes(
-                "w-full items-center no-wrap q-px-md pywebview-drag-region"
+                "w-full items-center no-wrap q-px-md"
             ).style(
-                f"height: 40px; border-bottom: 1px solid {FORGE_BORDER};"
+                f"height: 34px; border-bottom: 1px solid {FORGE_BORDER};"
             ):
                 # Left: THE FORGE
                 ui.html(
@@ -903,30 +906,24 @@ class ForgeDashboard:
 
     @staticmethod
     def _window_action(action: str) -> None:
-        """Execute a window control action via pywebview JS API.
+        """Execute a window control action.
 
-        Falls back gracefully if pywebview isn't available (Edge mode).
+        Close uses server-side app.shutdown() so it works in ALL modes.
+        Minimize/maximize use pywebview JS API (only works in native mode).
         """
         if action == "close":
-            ui.run_javascript("""
-                if (window.pywebview && window.pywebview.api && window.pywebview.api.close) {
-                    window.pywebview.api.close();
-                } else {
-                    window.close();
-                }
-            """)
+            # Server-side shutdown — works in pywebview, Edge, and browser
+            app.shutdown()
         elif action == "minimize":
-            ui.run_javascript("""
-                if (window.pywebview && window.pywebview.api && window.pywebview.api.minimize) {
-                    window.pywebview.api.minimize();
-                }
-            """)
+            ui.run_javascript(
+                "if(window.pywebview&&window.pywebview.api)"
+                "{window.pywebview.api.minimize()}"
+            )
         elif action == "maximize":
-            ui.run_javascript("""
-                if (window.pywebview && window.pywebview.api && window.pywebview.api.maximize) {
-                    window.pywebview.api.maximize();
-                }
-            """)
+            ui.run_javascript(
+                "if(window.pywebview&&window.pywebview.api)"
+                "{window.pywebview.api.maximize()}"
+            )
 
     # ── Info Chip Helper ──────────────────────────────────────────────────
 
