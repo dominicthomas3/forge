@@ -369,32 +369,6 @@ body::after {{
     animation: forge-spin 1s linear infinite;
 }}
 
-/* Title bar buttons */
-.forge-title-btn {{
-    width: 32px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    color: var(--forge-text-dim);
-    border: 1px solid transparent;
-    transition: all 0.15s ease;
-    background: transparent;
-}}
-.forge-title-btn:hover {{
-    color: var(--forge-text);
-    border-color: var(--forge-border);
-    background: var(--forge-surface-2);
-}}
-.forge-title-btn.close:hover {{
-    color: white;
-    background: var(--forge-fail);
-    border-color: var(--forge-fail);
-}}
-
-/* Window drag handled by pywebview easy_drag — no CSS drag regions needed */
-
 /* Cycle history row */
 .forge-cycle-row {{
     display: flex;
@@ -549,9 +523,7 @@ class ForgeDashboard:
             f"height: auto; background: {FORGE_BG} !important;"
         ):
             # Top row: logo + info + controls
-            # pywebview-drag-region = pywebview's built-in drag class
-            # DRAG_REGION_DIRECT_TARGET_ONLY=True ensures child elements stay clickable
-            with ui.row().classes("w-full items-center no-wrap q-px-md pywebview-drag-region").style(
+            with ui.row().classes("w-full items-center no-wrap q-px-md").style(
                 f"height: 40px; border-bottom: 1px solid {FORGE_BORDER};"
             ):
                 # Left: THE FORGE
@@ -580,31 +552,13 @@ class ForgeDashboard:
 
                 ui.space()
 
-                # Right: window controls
+                # Right: settings button
                 ui.button(
                     icon="settings",
                     on_click=lambda: self._settings_drawer.toggle(),
                 ).props("flat dense").style(
                     f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
                 ).tooltip("Configuration")
-                ui.button(
-                    icon="remove",
-                    on_click=lambda: self._minimize_window(),
-                ).props("flat dense").style(
-                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
-                ).tooltip("Minimize")
-                ui.button(
-                    icon="crop_square",
-                    on_click=lambda: self._maximize_window(),
-                ).props("flat dense").style(
-                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
-                ).tooltip("Maximize")
-                ui.button(
-                    icon="close",
-                    on_click=lambda: self._close_window(),
-                ).props("flat dense").style(
-                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
-                ).tooltip("Close")
 
         # ── Settings Drawer ───────────────────────────────────────
         self._settings_drawer = ui.right_drawer(value=False, bordered=True).style(
@@ -916,28 +870,6 @@ class ForgeDashboard:
             f'<span style="font-size:11px; color:{FORGE_TEXT};">{safe_value}</span>'
             f'</span>'
         )
-
-    # ── Window Controls ────────────────────────────────────────────────
-
-    @staticmethod
-    def _minimize_window() -> None:
-        """Minimize the native window via pywebview WindowProxy."""
-        if app.native.main_window:
-            app.native.main_window.minimize()
-
-    @staticmethod
-    def _maximize_window() -> None:
-        """Toggle maximize/restore on the native window."""
-        if app.native.main_window:
-            app.native.main_window.toggle_fullscreen()
-
-    @staticmethod
-    def _close_window() -> None:
-        """Cleanly shut down: destroy window → triggers on_shutdown → os._exit(0)."""
-        if app.native.main_window:
-            app.native.main_window.destroy()
-        else:
-            app.shutdown()
 
     # ── Event Handling ───────────────────────────────────────────────────
 

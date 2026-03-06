@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import platform
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,33 +31,6 @@ from pathlib import Path
 os.environ.pop("CLAUDECODE", None)
 
 from forge.config import ForgeConfig
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL pywebview config — MUST be here, NOT inside main().
-# NiceGUI native mode spawns a child process that re-imports this module.
-# If config is inside main(), the child process never sees it.
-# ══════════════════════════════════════════════════════════════════════════════
-from nicegui import app
-
-# Window behavior
-app.native.window_args['resizable'] = True
-app.native.window_args['min_size'] = (900, 600)
-app.native.window_args['easy_drag'] = False       # True eats ALL click events
-app.native.window_args['draggable'] = False        # Same — disable all auto-drag
-app.native.window_args['confirm_close'] = False    # No "are you sure?" dialog
-
-# CRITICAL: Only elements with pywebview-drag-region class are drag targets.
-# Without this, child elements (buttons/tabs) inside a drag region inherit
-# drag behavior and have their click events eaten by the OS.
-app.native.settings['DRAG_REGION_DIRECT_TARGET_ONLY'] = True
-
-# Font caching — private_mode=False lets pywebview cache fonts between sessions
-app.native.start_args['private_mode'] = False
-
-# Force EdgeChromium (WebView2) on Windows for proper WebSocket support.
-# MSHTML (IE) fallback does NOT support WebSocket reliably.
-if platform.system() == "Windows":
-    app.native.start_args['gui'] = 'edgechromium'
 
 
 def setup_logging(forge_data_dir: Path) -> None:
@@ -103,7 +77,6 @@ def ensure_port_available(port: int) -> None:
             )
             for line in out.stdout.splitlines():
                 parts = line.strip().split()
-                # Match exact port in local address column (e.g., "127.0.0.1:8080")
                 if len(parts) >= 5 and "LISTENING" in line:
                     local_addr = parts[1]
                     if local_addr.endswith(f":{port}"):
@@ -129,10 +102,57 @@ def ensure_port_available(port: int) -> None:
             pass
 
 
-def main():
-    from multiprocessing import freeze_support
-    freeze_support()
+def _find_edge_binary() -> str | None:
+    """Find Microsoft Edge binary on the system."""
+    candidates = [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ]
+    # Also check PATH
+    edge_in_path = shutil.which("msedge") or shutil.which("microsoft-edge")
+    if edge_in_path:
+        candidates.insert(0, edge_in_path)
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
 
+
+def _find_chrome_binary() -> str | None:
+    """Find Google Chrome binary on the system."""
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    chrome_in_path = shutil.which("chrome") or shutil.which("google-chrome")
+    if chrome_in_path:
+        candidates.insert(0, chrome_in_path)
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _launch_app_window(port: int) -> None:
+    """Launch Edge or Chrome in app mode — looks like a desktop app, no address bar."""
+    url = f"http://127.0.0.1:{port}"
+
+    browser = _find_edge_binary() or _find_chrome_binary()
+    if browser:
+        subprocess.Popen(
+            [browser, f"--app={url}", "--window-size=1400,900"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"  [WINDOW] Opened app window via {Path(browser).name}")
+    else:
+        # Fallback: open in default browser
+        import webbrowser
+        webbrowser.open(url)
+        print("  [WINDOW] Opened in default browser")
+
+
+def main():
     parser = argparse.ArgumentParser(
         description="Forge Dashboard — Real-time pipeline web UI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -226,19 +246,11 @@ Examples:
         else:
             parser.error("Live mode requires --task or --task-file")
 
-    from nicegui import ui
+    # ── NiceGUI imports ──────────────────────────────────────────────
+    from nicegui import app, ui
 
     from forge.dashboard import ForgeDashboard, attach_log_handler
     from forge.events import EventBus
-
-    # ── Clean shutdown: when window closes, kill the server ──────────
-    # Exit code 2 = user-initiated close (watchdog should NOT restart)
-    # Exit code 0 = update restart (watchdog SHOULD restart)
-    def _graceful_exit():
-        logging.shutdown()
-        os._exit(2)  # Exit code 2 → user close, watchdog won't restart
-
-    app.on_shutdown(_graceful_exit)
 
     # Build the dashboard
     event_bus = EventBus() if args.mode == "live" else None
@@ -251,11 +263,8 @@ Examples:
     @ui.page("/")
     def index():
         dashboard.build()
-
-        # Attach log handler after UI is built
         attach_log_handler(dashboard)
 
-        # In live mode, start the pipeline in a background task
         if args.mode == "live" and task_description:
             async def run_pipeline():
                 from forge.orchestrator import Orchestrator
@@ -264,20 +273,20 @@ Examples:
                     config=config,
                     task_description=task_description,
                 )
-                # Connect event buses
                 orchestrator.event_bus = event_bus
 
-                # Capture the running event loop for cross-thread event dispatch
                 loop = asyncio.get_running_loop()
                 event_bus.set_loop(loop)
 
-                # Run pipeline in a thread (it's synchronous, blocking)
                 try:
                     await loop.run_in_executor(None, orchestrator.run)
                 except Exception as e:
                     logging.exception("Pipeline crashed: %s", e)
 
             asyncio.get_running_loop().create_task(run_pipeline())
+
+    # ── Open app window after server starts ──────────────────────────
+    app.on_startup(lambda: _launch_app_window(args.port))
 
     # Print startup info
     from forge.version import FORGE_VERSION
@@ -294,22 +303,22 @@ Examples:
     print("=" * 60)
     print()
 
-    # Launch NiceGUI as a native desktop window (pywebview)
+    # ── Launch NiceGUI server (no pywebview) ─────────────────────────
+    # Edge/Chrome app mode handles the window — real browser engine,
+    # working WebSocket, no pywebview drag region bugs.
     ui.run(
         title="The Forge",
         host="127.0.0.1",
         port=args.port,
         reload=False,
-        show=True,
+        show=False,           # We handle window opening ourselves
         dark=True,
-        native=True,
-        window_size=(1400, 900),
-        frameless=True,
+        native=False,         # No pywebview — Edge app mode instead
         reconnect_timeout=30.0,
         storage_secret=os.environ.get("FORGE_SESSION_SECRET", "forge-session-" + str(os.getpid())),
         on_air=None,
     )
 
 
-if __name__ in {"__main__", "__mp_main__"}:
+if __name__ == "__main__":
     main()
