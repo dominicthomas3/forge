@@ -31,6 +31,33 @@ os.environ.pop("CLAUDECODE", None)
 
 from forge.config import ForgeConfig
 
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE-LEVEL pywebview config — MUST be here, NOT inside main().
+# NiceGUI native mode spawns a child process that re-imports this module.
+# If config is inside main(), the child process never sees it.
+# ══════════════════════════════════════════════════════════════════════════════
+from nicegui import app
+
+# Window behavior
+app.native.window_args['resizable'] = True
+app.native.window_args['min_size'] = (900, 600)
+app.native.window_args['easy_drag'] = False       # True eats ALL click events
+app.native.window_args['draggable'] = False        # Same — disable all auto-drag
+app.native.window_args['confirm_close'] = False    # No "are you sure?" dialog
+
+# CRITICAL: Only elements with pywebview-drag-region class are drag targets.
+# Without this, child elements (buttons/tabs) inside a drag region inherit
+# drag behavior and have their click events eaten by the OS.
+app.native.settings['DRAG_REGION_DIRECT_TARGET_ONLY'] = True
+
+# Font caching — private_mode=False lets pywebview cache fonts between sessions
+app.native.start_args['private_mode'] = False
+
+# Force EdgeChromium (WebView2) on Windows for proper WebSocket support.
+# MSHTML (IE) fallback does NOT support WebSocket reliably.
+if platform.system() == "Windows":
+    app.native.start_args['gui'] = 'edgechromium'
+
 
 def setup_logging(forge_data_dir: Path) -> None:
     """Configure logging to both console and file."""
@@ -103,6 +130,9 @@ def ensure_port_available(port: int) -> None:
 
 
 def main():
+    from multiprocessing import freeze_support
+    freeze_support()
+
     parser = argparse.ArgumentParser(
         description="Forge Dashboard — Real-time pipeline web UI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -196,23 +226,10 @@ Examples:
         else:
             parser.error("Live mode requires --task or --task-file")
 
-    # Late imports — NiceGUI takes a moment to initialize
-    from nicegui import app, ui
+    from nicegui import ui
 
     from forge.dashboard import ForgeDashboard, attach_log_handler
     from forge.events import EventBus
-
-    # ── pywebview native window config (must be set before ui.run) ───
-    app.native.window_args['resizable'] = True
-    app.native.window_args['min_size'] = (900, 600)
-    app.native.window_args['easy_drag'] = False  # True eats ALL click events
-    app.native.window_args['confirm_close'] = False  # no "are you sure?" dialog
-
-    # Force EdgeChromium (WebView2) renderer on Windows for proper WebSocket support.
-    # MSHTML (IE) fallback does NOT support WebSocket reliably.
-    app.native.start_args['private_mode'] = False  # enables font caching
-    if platform.system() == "Windows":
-        app.native.start_args['gui'] = 'edgechromium'
 
     # ── Clean shutdown: when window closes, kill the server ──────────
     # Exit code 2 = user-initiated close (watchdog should NOT restart)
@@ -263,9 +280,10 @@ Examples:
             asyncio.get_running_loop().create_task(run_pipeline())
 
     # Print startup info
+    from forge.version import FORGE_VERSION
     print()
     print("=" * 60)
-    print("  THE FORGE v0.0.1")
+    print(f"  THE FORGE v{FORGE_VERSION}")
     print("=" * 60)
     print(f"  Mode:    {args.mode}")
     print(f"  Port:    {args.port}")
@@ -277,11 +295,6 @@ Examples:
     print()
 
     # Launch NiceGUI as a native desktop window (pywebview)
-    # native=True renders in a real OS window, not a browser tab
-    # frameless=True removes OS chrome — custom title bar provides controls
-    # reconnect_timeout=30.0 fixes "connection lost" flicker on initial load
-    # storage_secret enables session persistence across reconnects
-    # on_air=None prevents NiceGUI from attempting external connectivity
     ui.run(
         title="The Forge",
         host="127.0.0.1",
@@ -298,5 +311,5 @@ Examples:
     )
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     main()
