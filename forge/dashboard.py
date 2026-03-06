@@ -80,7 +80,16 @@ body {{
 
 html, body {{
     height: 100vh !important;
+    overflow: hidden !important;
     margin: 0 !important;
+}}
+.nicegui-content {{
+    height: 100vh !important;
+    overflow: hidden !important;
+}}
+.q-page-container {{
+    height: calc(100vh - 40px - 28px) !important;
+    overflow-y: auto !important;
 }}
 body {{
     background: var(--forge-bg) !important;
@@ -117,8 +126,10 @@ body::after {{
 .q-btn {{
     color: var(--forge-primary) !important;
 }}
-.q-btn .q-icon {{
-    color: var(--forge-primary) !important;
+.q-btn .q-icon,
+.q-btn .q-btn__content,
+.q-btn .block {{
+    color: inherit !important;
 }}
 .q-field__native, .q-field__input {{
     color: var(--forge-text) !important;
@@ -523,7 +534,12 @@ class ForgeDashboard:
             f"height: auto; background: {FORGE_BG} !important;"
         ):
             # Top row: logo + info + controls
-            with ui.row().classes("w-full items-center no-wrap q-px-md").style(
+            # pywebview-drag-region makes this row draggable in frameless mode.
+            # DRAG_REGION_DIRECT_TARGET_ONLY ensures only the row background
+            # triggers drag — child elements (buttons, labels) stay clickable.
+            with ui.row().classes(
+                "w-full items-center no-wrap q-px-md pywebview-drag-region"
+            ).style(
                 f"height: 40px; border-bottom: 1px solid {FORGE_BORDER};"
             ):
                 # Left: THE FORGE
@@ -552,19 +568,40 @@ class ForgeDashboard:
 
                 ui.space()
 
-                # Right: settings button
+                # Right: window control buttons
                 ui.button(
                     icon="settings",
-                    on_click=lambda: self._settings_drawer.toggle(),
+                    on_click=self._toggle_settings,
                 ).props("flat dense").style(
                     f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
                 ).tooltip("Configuration")
+
+                ui.button(
+                    icon="remove",
+                    on_click=lambda: self._window_action("minimize"),
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
+                ).tooltip("Minimize")
+
+                ui.button(
+                    icon="crop_square",
+                    on_click=lambda: self._window_action("maximize"),
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
+                ).tooltip("Maximize")
+
+                ui.button(
+                    icon="close",
+                    on_click=lambda: self._window_action("close"),
+                ).props("flat dense").style(
+                    f"color: {FORGE_PRIMARY} !important; font-size: 18px;"
+                ).tooltip("Close")
 
         # ── Settings Drawer ───────────────────────────────────────
         self._settings_drawer = ui.right_drawer(value=False, bordered=True).style(
             f"width: 340px; background: {FORGE_SURFACE} !important; "
             f"border-left: 1px solid {FORGE_PRIMARY} !important;"
-        ).props("overlay")
+        ).props("overlay elevated")
         with self._settings_drawer:
             self._build_settings_panel()
 
@@ -721,7 +758,7 @@ class ForgeDashboard:
                     icon="refresh",
                     on_click=self._refresh_history,
                 ).props("flat dense size=sm").style(
-                    f"color: {FORGE_PRIMARY}; font-size: 10px; letter-spacing: 0.1em;"
+                    f"color: {FORGE_PRIMARY} !important; font-size: 10px; letter-spacing: 0.1em;"
                 )
 
             self._history_cycle_select = ui.select(
@@ -748,7 +785,7 @@ class ForgeDashboard:
                     icon="refresh",
                     on_click=self._refresh_report,
                 ).props("flat dense size=sm").style(
-                    f"color: {FORGE_PRIMARY}; font-size: 10px; letter-spacing: 0.1em;"
+                    f"color: {FORGE_PRIMARY} !important; font-size: 10px; letter-spacing: 0.1em;"
                 )
 
             self._report_container = ui.column().classes("w-full")
@@ -767,7 +804,7 @@ class ForgeDashboard:
                 ui.space()
                 ui.button(
                     icon="close",
-                    on_click=lambda: self._settings_drawer.toggle(),
+                    on_click=self._toggle_settings,
                 ).props("flat dense size=sm").style(f"color: {FORGE_TEXT_DIM};")
 
             # Pipeline section
@@ -856,6 +893,40 @@ class ForgeDashboard:
                 ui.notify("Already up to date", type="positive")
         except Exception as e:
             ui.notify(f"Update check failed: {e}", type="negative")
+
+    # ── Window Controls ────────────────────────────────────────────────
+
+    def _toggle_settings(self) -> None:
+        """Toggle the settings drawer open/closed."""
+        if self._settings_drawer:
+            self._settings_drawer.value = not self._settings_drawer.value
+
+    @staticmethod
+    def _window_action(action: str) -> None:
+        """Execute a window control action via pywebview JS API.
+
+        Falls back gracefully if pywebview isn't available (Edge mode).
+        """
+        if action == "close":
+            ui.run_javascript("""
+                if (window.pywebview && window.pywebview.api && window.pywebview.api.close) {
+                    window.pywebview.api.close();
+                } else {
+                    window.close();
+                }
+            """)
+        elif action == "minimize":
+            ui.run_javascript("""
+                if (window.pywebview && window.pywebview.api && window.pywebview.api.minimize) {
+                    window.pywebview.api.minimize();
+                }
+            """)
+        elif action == "maximize":
+            ui.run_javascript("""
+                if (window.pywebview && window.pywebview.api && window.pywebview.api.maximize) {
+                    window.pywebview.api.maximize();
+                }
+            """)
 
     # ── Info Chip Helper ──────────────────────────────────────────────────
 

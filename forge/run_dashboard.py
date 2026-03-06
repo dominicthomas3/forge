@@ -23,9 +23,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # Strip CLAUDECODE env var — same as run_overnight.py
 os.environ.pop("CLAUDECODE", None)
@@ -102,13 +104,44 @@ def ensure_port_available(port: int) -> None:
             pass
 
 
+def _wait_for_server(port: int, timeout: float = 15.0) -> None:
+    """Block until the NiceGUI server accepts connections."""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=1)
+            sock.close()
+            return
+        except (ConnectionRefusedError, socket.timeout, OSError):
+            time.sleep(0.2)
+    raise RuntimeError(f"NiceGUI server didn't start within {timeout}s")
+
+
+class _WindowApi:
+    """Exposed to JavaScript as window.pywebview.api for custom window controls."""
+
+    def __init__(self) -> None:
+        self._window: Any = None
+
+    def close(self) -> None:
+        if self._window:
+            self._window.destroy()
+
+    def minimize(self) -> None:
+        if self._window:
+            self._window.minimize()
+
+    def maximize(self) -> None:
+        if self._window:
+            self._window.toggle_fullscreen()
+
+
 def _find_edge_binary() -> str | None:
     """Find Microsoft Edge binary on the system."""
     candidates = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ]
-    # Also check PATH
     edge_in_path = shutil.which("msedge") or shutil.which("microsoft-edge")
     if edge_in_path:
         candidates.insert(0, edge_in_path)
@@ -133,10 +166,9 @@ def _find_chrome_binary() -> str | None:
     return None
 
 
-def _launch_app_window(port: int) -> None:
-    """Launch Edge or Chrome in app mode — looks like a desktop app, no address bar."""
+def _launch_edge_fallback(port: int) -> None:
+    """Fallback: open Edge/Chrome in app mode if pywebview fails."""
     url = f"http://127.0.0.1:{port}"
-
     browser = _find_edge_binary() or _find_chrome_binary()
     if browser:
         subprocess.Popen(
@@ -144,12 +176,11 @@ def _launch_app_window(port: int) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print(f"  [WINDOW] Opened app window via {Path(browser).name}")
+        print(f"  [FALLBACK] Opened app window via {Path(browser).name}")
     else:
-        # Fallback: open in default browser
         import webbrowser
         webbrowser.open(url)
-        print("  [WINDOW] Opened in default browser")
+        print("  [FALLBACK] Opened in default browser")
 
 
 def main():
@@ -285,17 +316,15 @@ Examples:
 
             asyncio.get_running_loop().create_task(run_pipeline())
 
-    # ── Open app window after server starts ──────────────────────────
-    app.on_startup(lambda: _launch_app_window(args.port))
-
     # Print startup info
     from forge.version import FORGE_VERSION
+    port = args.port
     print()
     print("=" * 60)
     print(f"  THE FORGE v{FORGE_VERSION}")
     print("=" * 60)
     print(f"  Mode:    {args.mode}")
-    print(f"  Port:    {args.port}")
+    print(f"  Port:    {port}")
     print(f"  Data:    {config.forge_data_dir}")
     print(f"  Target:  {config.target_project}")
     if task_description:
@@ -303,21 +332,93 @@ Examples:
     print("=" * 60)
     print()
 
-    # ── Launch NiceGUI server (no pywebview) ─────────────────────────
-    # Edge/Chrome app mode handles the window — real browser engine,
-    # working WebSocket, no pywebview drag region bugs.
-    ui.run(
-        title="The Forge",
-        host="127.0.0.1",
-        port=args.port,
-        reload=False,
-        show=False,           # We handle window opening ourselves
-        dark=True,
-        native=False,         # No pywebview — Edge app mode instead
-        reconnect_timeout=30.0,
-        storage_secret=os.environ.get("FORGE_SESSION_SECRET", "forge-session-" + str(os.getpid())),
-        on_air=None,
-    )
+    # ── Try native pywebview frameless window ────────────────────────
+    # Strategy: run NiceGUI server in a daemon thread, pywebview on
+    # the main thread. This bypasses NiceGUI's broken native mode
+    # (multiprocessing + easy_drag issues) while giving us a real
+    # frameless window with custom buttons.
+    use_native = True
+    try:
+        import webview
+    except ImportError:
+        print("  [INFO] pywebview not installed — using Edge app mode")
+        use_native = False
+
+    if use_native:
+        # Start NiceGUI server in a daemon thread
+        def _run_server():
+            ui.run(
+                title="The Forge",
+                host="127.0.0.1",
+                port=port,
+                reload=False,
+                show=False,
+                dark=True,
+                native=False,         # Server only — no pywebview from NiceGUI
+                reconnect_timeout=30.0,
+                storage_secret=os.environ.get(
+                    "FORGE_SESSION_SECRET", f"forge-session-{os.getpid()}"
+                ),
+                on_air=None,
+            )
+
+        server_thread = threading.Thread(target=_run_server, daemon=True)
+        server_thread.start()
+
+        try:
+            _wait_for_server(port)
+            print("  [NATIVE] Server ready, opening frameless window...")
+
+            # Configure pywebview for selective drag (title bar only)
+            webview.DRAG_REGION_DIRECT_TARGET_ONLY = True
+
+            api = _WindowApi()
+            window = webview.create_window(
+                "The Forge",
+                f"http://127.0.0.1:{port}",
+                width=1400,
+                height=900,
+                frameless=True,
+                easy_drag=False,      # CRITICAL: prevents click interception
+                min_size=(900, 600),
+                js_api=api,
+            )
+            api._window = window
+
+            # Blocks until user closes the window
+            webview.start(private_mode=False, gui="edgechromium")
+
+            print("  [NATIVE] Window closed, shutting down.")
+            sys.exit(0)
+
+        except Exception as e:
+            print(f"  [NATIVE] pywebview failed: {e}")
+            print("  [NATIVE] Falling back to Edge app mode...")
+            _launch_edge_fallback(port)
+            # Keep main thread alive for the server
+            try:
+                while server_thread.is_alive():
+                    server_thread.join(timeout=1)
+            except KeyboardInterrupt:
+                print("\n  Shutting down...")
+                sys.exit(0)
+    else:
+        # ── Edge/Chrome app mode fallback ────────────────────────────
+        app.on_startup(lambda: _launch_edge_fallback(port))
+        ui.run(
+            title="The Forge",
+            host="127.0.0.1",
+            port=port,
+            reload=False,
+            show=False,
+            dark=True,
+            native=False,
+            reconnect_timeout=30.0,
+            storage_secret=os.environ.get(
+                "FORGE_SESSION_SECRET", f"forge-session-{os.getpid()}"
+            ),
+            on_air=None,
+        )
 
 
 if __name__ == "__main__":
