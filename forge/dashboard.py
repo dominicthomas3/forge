@@ -80,16 +80,38 @@ body {{
 
 html, body {{
     height: 100% !important;
-    overflow: hidden !important;
     margin: 0 !important;
     padding: 0 !important;
+    overflow: hidden !important;
 }}
 .nicegui-content {{
     height: 100% !important;
     overflow: hidden !important;
 }}
 .q-layout {{
-    height: 100vh !important;
+    height: 100% !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+}}
+.q-header {{
+    position: relative !important;
+    flex-shrink: 0 !important;
+}}
+.q-footer {{
+    position: relative !important;
+    flex-shrink: 0 !important;
+}}
+.q-page-container {{
+    flex: 1 !important;
+    overflow-y: auto !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    min-height: 0 !important;
+}}
+.q-page {{
+    padding-bottom: 0 !important;
+    padding-top: 0 !important;
 }}
 body {{
     background: var(--forge-bg) !important;
@@ -172,6 +194,7 @@ body::after {{
     background: var(--forge-bg) !important;
     border-top: 1px solid var(--forge-border) !important;
     box-shadow: none !important;
+    bottom: 0 !important;
 }}
 
 .q-tab {{
@@ -634,8 +657,8 @@ class ForgeDashboard:
 
         # ── Bottom Status Bar ─────────────────────────────────────
         with ui.footer().style(
-            f"height: 28px; background: {FORGE_BG} !important; "
-            f"border-top: 1px solid {FORGE_BORDER};"
+            f"height: 32px; min-height: 32px; background: {FORGE_BG} !important; "
+            f"border-top: 1px solid {FORGE_BORDER}; padding: 2px 0;"
         ):
             with ui.row().classes("w-full items-center no-wrap q-px-md").style(
                 "height: 28px;"
