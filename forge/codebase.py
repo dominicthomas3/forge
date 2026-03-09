@@ -60,10 +60,10 @@ def load_codebase(config: ForgeConfig) -> str:
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
             rel_path = path.relative_to(root)
-            line_count = content.count("\\n") + 1
+            line_count = content.count("\n") + 1
             total_lines += line_count
             parts.append(
-                f'\\n<file path="{rel_path}" lines="{line_count}">\\n'
+                f'\n<file path="{rel_path}" lines="{line_count}">\n'
                 f"{content}"
                 f"</file>"
             )
@@ -72,11 +72,11 @@ def load_codebase(config: ForgeConfig) -> str:
             continue
 
     header = (
-        f"# FULL CODEBASE — {files_loaded} files, {total_lines:,} total lines\\n"
-        f"# Project: {root.name} ({root})\\n"
-        f"# Extensions: {', '.join(config.source_extensions)}\\n"
+        f"# FULL CODEBASE — {files_loaded} files, {total_lines:,} total lines\n"
+        f"# Project: {root.name} ({root})\n"
+        f"# Extensions: {', '.join(config.source_extensions)}\n"
     )
-    return header + "\\n".join(parts)
+    return header + "\n".join(parts)
 
 
 def load_codebase_python_only(config: ForgeConfig) -> str:
@@ -106,7 +106,7 @@ def get_codebase_stats(config: ForgeConfig) -> dict:
 
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
-            line_count = content.count("\\n") + 1
+            line_count = content.count("\n") + 1
             stats["files"] += 1
             stats["lines"] += line_count
             ext = path.suffix

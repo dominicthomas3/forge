@@ -106,7 +106,7 @@ class SessionReport:
         ]
         for i, ex in enumerate(self.exchanges, 1):
             sent_summary = ex.sent[:60] + "..." if len(ex.sent) > 60 else ex.sent
-            sent_summary = sent_summary.replace("|", "\|").replace("\\n", " ")
+            sent_summary = sent_summary.replace("|", r"\|").replace("\n", " ")
             lines.append(
                 f"| {i} | {ex.category} | {sent_summary} | "
                 f"{ex.model_key} | {ex.latency_ms}ms | ${ex.cost:.4f} |"
@@ -486,8 +486,8 @@ class Morpheus:
         """
         # Build transcript summary for context
         recent = self.exchanges[-5:] if self.exchanges else []
-        transcript = "\\n".join(
-            f"Morpheus: {ex.sent}\\nSpectre: {ex.received[:200]}"
+        transcript = "\n".join(
+            f"Morpheus: {ex.sent}\nSpectre: {ex.received[:200]}"
             for ex in recent
         )
 

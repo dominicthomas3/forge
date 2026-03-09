@@ -915,28 +915,28 @@ class Orchestrator:
                 content = sf.read_text(encoding="utf-8", errors="replace")
                 # Truncate for readability
                 if len(content) > 3000:
-                    content = content[:3000] + "\\n\\n... (truncated — see full file)"
+                    content = content[:3000] + "\n\n... (truncated — see full file)"
                 lines.append(content)
                 lines.append("")
-                last_cycle_details += f"### {sf.name}\\n{content}\\n\\n"
+                last_cycle_details += f"### {sf.name}\n{content}\n\n"
 
         # Ask Jim for an Executive Summary and Next Steps
         logger.info("Generating AI executive summary and brainstorming...")
         prompt = (
-            "You are Jim, the lead architect. The automated Forge pipeline just finished running.\\n"
-            f"Original Task: {self.task}\\n\\n"
-            "The pipeline has successfully completed its cycles. Write a final report for the user containing:\\n"
-            "1. An 'Executive Summary' detailing exactly what was done and improved. Use very simple, plain English context.\\n"
-            "2. A 'Brainstorming / Next Steps' section where you recommend the best next parts of the codebase to upgrade or optimize. \\n"
-            "   CRITICAL: Explain these recommendations using easy-to-understand analogies and a philosophical approach to software engineering (like building a Ferrari or a finely tuned machine).\\n\\n"
-            f"--- LAST CYCLE DETAILS ---\\n{last_cycle_details[:30000]}"
+            "You are Jim, the lead architect. The automated Forge pipeline just finished running.\n"
+            f"Original Task: {self.task}\n\n"
+            "The pipeline has successfully completed its cycles. Write a final report for the user containing:\n"
+            "1. An 'Executive Summary' detailing exactly what was done and improved. Use very simple, plain English context.\n"
+            "2. A 'Brainstorming / Next Steps' section where you recommend the best next parts of the codebase to upgrade or optimize. \n"
+            "   CRITICAL: Explain these recommendations using easy-to-understand analogies and a philosophical approach to software engineering (like building a Ferrari or a finely tuned machine).\n\n"
+            f"--- LAST CYCLE DETAILS ---\n{last_cycle_details[:30000]}"
         )
         try:
             ai_summary = self.runner.run_gemini(prompt, timeout=300)
-            lines.insert(12, "## AI Executive Summary & Next Steps\\n" + ai_summary + "\\n")
+            lines.insert(12, "## AI Executive Summary & Next Steps\n" + ai_summary + "\n")
         except Exception as e:
             logger.warning(f"Failed to generate AI summary: {e}")
-            lines.insert(12, f"## AI Executive Summary\\n*(Summary generation failed: {e})*\\n")
+            lines.insert(12, f"## AI Executive Summary\n*(Summary generation failed: {e})*\n")
 
         # Rollback instructions
         lines.append("## Rollback")
@@ -948,6 +948,6 @@ class Orchestrator:
             lines.append("git checkout <commit-hash>  # roll back to any checkpoint")
         lines.append("```")
 
-        report = "\\n".join(lines)
+        report = "\n".join(lines)
         report_path.write_text(report, encoding="utf-8")
         return report_path
