@@ -15,9 +15,12 @@ a way that activates Deep Think's extended reasoning most effectively.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from pathlib import Path
 
+from forge.checkpoint import atomic_write
 from forge.config import ForgeConfig
 from forge.runner import Runner
 
@@ -81,7 +84,65 @@ it becomes a bug. You are the last checkpoint before code is written.
 - Include verification steps ("after this change, run X to confirm").
 - If Jim's plan is solid, say so clearly and explain WHY it's correct.
 - If you find problems, describe the EXACT failure scenario, not just "this might break."
-- Don't manufacture issues to seem thorough. False positives waste more time than false negatives."""
+- Don't manufacture issues to seem thorough. False positives waste more time than false negatives.
+
+## REQUIRED OUTPUT FORMAT
+
+You MUST output your analysis as a JSON block wrapped in ```json fences.
+This JSON will be consumed programmatically by Claude Code (Stage 3).
+After the JSON block, you may add free-form discussion.
+
+Schema:
+```json
+{
+  "verdict": "APPROVE" | "APPROVE_WITH_CONSTRAINTS" | "REJECT",
+  "summary": "2-3 sentence overall assessment",
+  "change_assessments": [
+    {
+      "file": "path/to/file.py",
+      "change": "what Jim proposed",
+      "risk": "LOW" | "MEDIUM" | "HIGH",
+      "approved": true,
+      "dependencies": ["file1.py"],
+      "verification_steps": ["step 1"],
+      "concerns": "any concerns or modifications needed",
+      "ordering_constraint": "must happen before/after X"
+    }
+  ],
+  "constraints": [
+    "Stage 3 MUST obey these constraints when implementing"
+  ],
+  "edge_cases": [
+    {
+      "scenario": "description of edge case",
+      "affected_files": ["file.py"],
+      "mitigation": "how to handle it"
+    }
+  ],
+  "improved_plan": "If you modified Jim's plan, describe what changed and why"
+}
+```
+
+If you REJECT the plan, explain WHY in the summary and what Jim should do differently.
+If you APPROVE_WITH_CONSTRAINTS, list the constraints that Stage 3 must follow."""
+
+
+def _parse_deep_think_output(output: str) -> dict | None:
+    """Parse Deep Think's structured JSON output.
+
+    Searches for ```json blocks containing a "verdict" key.
+    Returns the parsed dict, or None if no valid JSON found.
+    Falls back gracefully — the pipeline works with free-text too.
+    """
+    json_blocks = re.findall(r'```json\s*\n(.*?)```', output, re.DOTALL)
+    for block in json_blocks:
+        try:
+            parsed = json.loads(block.strip())
+            if isinstance(parsed, dict) and "verdict" in parsed:
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 def run(
@@ -96,6 +157,11 @@ def run(
 
     logger.info("Stage 2: Deep Think Verification")
 
+    # Clean stale structured JSON from previous runs — prevents Stage 3
+    # from loading constraints meant for a different plan.
+    stale_json = cycle_dir / "02-deep-think-structured.json"
+    stale_json.unlink(missing_ok=True)
+
     # Read Jim's analysis
     jim_analysis = jim_analysis_path.read_text(encoding="utf-8")
     logger.info("Jim analysis loaded: %d chars", len(jim_analysis))
@@ -108,7 +174,7 @@ def run(
     )
 
     # Save Claude's crafted prompt for inspection
-    claude_prompt_path.write_text(crafted_prompt, encoding="utf-8")
+    atomic_write(claude_prompt_path, crafted_prompt)
     logger.info(
         "Claude crafted prompt: %d chars (saved to %s)",
         len(crafted_prompt),
@@ -122,8 +188,21 @@ def run(
         system=_DEEP_THINK_SYSTEM,
     )
 
-    # Save output
-    output_path.write_text(result, encoding="utf-8")
+    # Parse structured output (JSON verdict + assessments)
+    structured = _parse_deep_think_output(result)
+    if structured:
+        json_path = cycle_dir / "02-deep-think-structured.json"
+        atomic_write(json_path, json.dumps(structured, indent=2))
+        verdict = structured.get("verdict", "UNKNOWN")
+        n_assessments = len(structured.get("change_assessments", []))
+        logger.info("Deep Think verdict: %s (%d change assessments)", verdict, n_assessments)
+        if verdict == "REJECT":
+            logger.warning("Deep Think REJECTED Jim's plan: %s", structured.get("summary", "no reason"))
+    else:
+        logger.warning("Deep Think did not produce valid JSON — Stage 3 will use free-text plan")
+
+    # Save raw output (always — serves as the canonical stage output)
+    atomic_write(output_path, result)
     logger.info("Deep Think verification saved: %s (%d chars)", output_path, len(result))
 
     return output_path

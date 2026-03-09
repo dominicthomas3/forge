@@ -9,9 +9,11 @@ meaning it can read, write, and execute anything needed.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
+from forge.checkpoint import atomic_write
 from forge.config import ForgeConfig
 from forge.runner import Runner
 
@@ -76,7 +78,35 @@ def run(
     deep_think_plan = deep_think_path.read_text(encoding="utf-8")
     logger.info("Deep Think plan loaded: %d chars", len(deep_think_plan))
 
+    # Try to load structured Deep Think output for enhanced prompting
+    structured_path = cycle_dir / "02-deep-think-structured.json"
+    constraints_block = ""
+    edge_cases_block = ""
+    if structured_path.exists():
+        try:
+            structured = json.loads(structured_path.read_text(encoding="utf-8"))
+            verdict = structured.get("verdict", "UNKNOWN")
+            logger.info("Loaded structured Deep Think plan (verdict: %s)", verdict)
+
+            # Inject constraints as mandatory rules
+            if structured.get("constraints"):
+                constraints_block = (
+                    "\n\nMANDATORY CONSTRAINTS (from Deep Think verification — you MUST obey these):\n"
+                    + "\n".join(f"- {c}" for c in structured["constraints"])
+                )
+
+            # Inject edge cases to handle
+            if structured.get("edge_cases"):
+                edge_cases_block = "\n\nEDGE CASES TO HANDLE (discovered during verification):\n"
+                for ec in structured["edge_cases"]:
+                    scenario = ec.get("scenario", "")
+                    mitigation = ec.get("mitigation", "")
+                    edge_cases_block += f"- {scenario}: {mitigation}\n"
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Could not load structured Deep Think plan — using free text only")
+
     prompt = _IMPLEMENTATION_PROMPT.format(deep_think_plan=deep_think_plan)
+    prompt += constraints_block + edge_cases_block
 
     # Append stage-specific supplement to the blueprint
     from forge.worker_blueprint import STAGE_3_SUPPLEMENT
@@ -85,8 +115,8 @@ def run(
     # Run Claude Code with full file access — generous timeout for multi-file edits
     result = runner.run_claude(prompt, blueprint="full")
 
-    # Save output
-    output_path.write_text(result, encoding="utf-8")
+    # Save output (atomic write prevents corruption on crash)
+    atomic_write(output_path, result)
     logger.info("Claude implementation log saved: %s (%d chars)", output_path, len(result))
 
     return output_path

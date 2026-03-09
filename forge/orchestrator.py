@@ -17,6 +17,7 @@ The morning report summarizes everything.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
@@ -24,6 +25,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from forge.checkpoint import (
+    CycleCheckpoint,
+    atomic_write,
+    detect_context_exhaustion,
+    load_checkpoint,
+    save_checkpoint,
+    validate_stage_output,
+    _file_checksum,
+)
 from forge.codebase import load_codebase
 from forge.config import ForgeConfig
 from forge.events import EventBus, EventType, ForgeEvent
@@ -58,6 +68,9 @@ class Orchestrator:
         # Cross-cycle learning memory — accumulates patterns across cycles.
         # Fed into Jim and Claude blueprints so the pipeline doesn't repeat mistakes.
         self._cycle_learnings: list[str] = []
+
+        # Per-cycle retry counters (replaces dynamic setattr pattern)
+        self._cycle_retries: dict[int, int] = {}
 
     # ── Main Loop ─────────────────────────────────────────────────────
 
@@ -94,6 +107,11 @@ class Orchestrator:
         # If cycle-001/ exists but has no stress test output, we resume it
         # instead of starting cycle-002.
         existing_cycles = sorted(self.config.forge_data_dir.glob("cycle-*"))
+        # Filter to only valid cycle-NNN directories (ignore cycle-backup, etc.)
+        existing_cycles = [
+            d for d in existing_cycles
+            if re.match(r'^cycle-\d+$', d.name)
+        ]
         if existing_cycles:
             last_cycle_dir = existing_cycles[-1]
             stress_file = last_cycle_dir / "07-stress-test.md"
@@ -132,6 +150,16 @@ class Orchestrator:
                     "stress_verdict": last_verdict,
                 }
                 logger.info("Loaded stress test from cycle-%03d (verdict=%s)", cycle_num, last_verdict)
+
+            # Rehydrate cross-cycle learnings from the last checkpoint.
+            # Without this, accumulated anti-patterns are lost on restart.
+            last_ckpt = load_checkpoint(last_cycle_dir)
+            if last_ckpt and last_ckpt.cycle_learnings:
+                self._cycle_learnings = list(last_ckpt.cycle_learnings)
+                logger.info(
+                    "RESUME: Rehydrated %d cross-cycle learnings from checkpoint",
+                    len(self._cycle_learnings),
+                )
 
             # Count trailing consecutive clean passes from completed cycles.
             # This preserves convergence progress across pipeline restarts.
@@ -174,14 +202,10 @@ class Orchestrator:
             # If the cycle errored and we haven't retried yet, retry the SAME
             # cycle instead of moving on. The resume logic will skip completed
             # stages automatically. Cap at 3 retries per cycle to avoid infinite loops.
-            retry_key = f"_retries_cycle_{self.cycle}"
-            if not hasattr(self, retry_key):
-                setattr(self, retry_key, 0)
-
             if cycle_result.get("stress_verdict") == "ERROR":
-                retries = getattr(self, retry_key)
+                retries = self._cycle_retries.get(self.cycle, 0)
                 if retries < 3:
-                    setattr(self, retry_key, retries + 1)
+                    self._cycle_retries[self.cycle] = retries + 1
                     logger.warning(
                         "Cycle %d errored — retrying (%d/3) with resume from completed stages",
                         self.cycle, retries + 1,
@@ -193,6 +217,20 @@ class Orchestrator:
                     logger.error("Cycle %d failed after 3 retries — moving on", self.cycle)
 
             self.cycle_results.append(cycle_result)
+
+            # Fatal error circuit breaker: if N consecutive cycles fail entirely
+            # (e.g., API key revoked, network outage), stop burning through cycles.
+            if len(self.cycle_results) >= 3:
+                recent_three = self.cycle_results[-3:]
+                if all(r.get("stress_verdict") == "ERROR" for r in recent_three):
+                    logger.error(
+                        "FATAL: 3 consecutive cycles failed with ERROR — stopping pipeline. "
+                        "Check API keys, network connectivity, and model availability."
+                    )
+                    self.errors.append(
+                        "Pipeline stopped: 3 consecutive ERROR cycles (possible fatal issue)"
+                    )
+                    break
 
             # Track convergence
             if cycle_result.get("stress_verdict") == "PASS":
@@ -273,14 +311,63 @@ class Orchestrator:
             6: "06-fixes-applied.log",
             7: "07-stress-test.md",
         }
+        _STAGE_NAMES = {
+            1: "jim_analysis", 2: "deep_think", 3: "claude_implement",
+            4: "claude_review", 5: "consensus", 6: "apply_fixes", 7: "stress_test",
+        }
         _MIN_OUTPUT_SIZE = 50  # bytes — smaller than this is a partial/corrupt write
 
+        # Load or create cycle checkpoint for crash recovery
+        checkpoint = load_checkpoint(cycle_dir) or CycleCheckpoint(
+            cycle_number=self.cycle,
+            task_description=self.task[:500],
+            started_at=datetime.now().isoformat(),
+            last_updated=datetime.now().isoformat(),
+            cycle_learnings=list(self._cycle_learnings),
+        )
+
+        def _record_stage(stage_num: int, output_path: Path, elapsed: float) -> None:
+            """Record a completed stage in the checkpoint."""
+            checkpoint.completed_stages.append({
+                "stage_number": stage_num,
+                "stage_name": _STAGE_NAMES.get(stage_num, f"stage_{stage_num}"),
+                "output_path": str(output_path),
+                "timestamp": datetime.now().isoformat(),
+                "cycle_number": self.cycle,
+                "elapsed_seconds": round(elapsed, 1),
+                "output_size_bytes": output_path.stat().st_size,
+                "checksum": _file_checksum(output_path),
+            })
+            save_checkpoint(cycle_dir, checkpoint)
+
         def _stage_done(stage_num: int) -> Path | None:
-            """Return output path if stage already completed, else None."""
+            """Return output path if stage already completed and validated, else None."""
             path = cycle_dir / _STAGE_FILES[stage_num]
-            if path.exists() and path.stat().st_size >= _MIN_OUTPUT_SIZE:
-                return path
-            return None
+            if not path.exists() or path.stat().st_size < _MIN_OUTPUT_SIZE:
+                return None
+            # Always validate content — even without a checkpoint entry.
+            # A file may exist from a crash before checkpointing completed.
+            is_valid, reason = validate_stage_output(path, stage_num)
+            if not is_valid:
+                logger.warning(
+                    "Stage %d output failed validation: %s — will re-run",
+                    stage_num, reason,
+                )
+                return None
+            # Additional checksum verification if checkpoint exists
+            stage_ckpt = next(
+                (s for s in checkpoint.completed_stages if s.get("stage_number") == stage_num),
+                None,
+            )
+            if stage_ckpt and stage_ckpt.get("checksum"):
+                actual = _file_checksum(path)
+                if actual != stage_ckpt["checksum"]:
+                    logger.warning(
+                        "Stage %d output checksum mismatch — file modified externally, will re-run",
+                        stage_num,
+                    )
+                    return None
+            return path
 
         impl_branch = None  # Set before try so except handlers can reference it
 
@@ -313,9 +400,11 @@ class Orchestrator:
                     codebase=codebase_snapshot,
                     cycle_learnings=self._cycle_learnings if self._cycle_learnings else None,
                 )
+                _s1_elapsed = time.time() - _s1_start
+                _record_stage(1, jim_path, _s1_elapsed)
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=1,
-                    output_path=str(jim_path), elapsed=round(time.time() - _s1_start, 1),
+                    output_path=str(jim_path), elapsed=round(_s1_elapsed, 1),
                 )
             result["stages_completed"].append("jim_analysis")
             result["jim_analysis"] = jim_path.read_text(encoding="utf-8")[:5000]
@@ -335,11 +424,47 @@ class Orchestrator:
                     runner=self.runner,
                     jim_analysis_path=jim_path,
                 )
+                _s2_elapsed = time.time() - _s2_start
+                _record_stage(2, deep_think_path, _s2_elapsed)
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=2,
-                    output_path=str(deep_think_path), elapsed=round(time.time() - _s2_start, 1),
+                    output_path=str(deep_think_path), elapsed=round(_s2_elapsed, 1),
                 )
             result["stages_completed"].append("deep_think")
+
+            # Deep Think REJECT gate — if Deep Think explicitly rejected Jim's plan,
+            # halt the cycle BEFORE Stage 3 burns 30+ minutes implementing a bad plan.
+            # The cycle ends early, Jim gets the rejection feedback next cycle.
+            dt_structured_path = cycle_dir / "02-deep-think-structured.json"
+            if dt_structured_path.exists():
+                try:
+                    dt_json = json.loads(dt_structured_path.read_text(encoding="utf-8"))
+                    dt_verdict = dt_json.get("verdict", "")
+                    if dt_verdict == "REJECT":
+                        reject_reason = dt_json.get("summary", "no reason given")
+                        logger.warning(
+                            "CYCLE HALTED: Deep Think REJECTED Jim's plan — skipping Stages 3-7. "
+                            "Reason: %s", reject_reason,
+                        )
+                        result["stress_verdict"] = "FAIL"
+                        result["deep_think_verdict"] = "REJECT"
+                        result["deep_think_reject_reason"] = reject_reason
+                        result["halted_at_stage"] = 2
+                        result["errors"].append(f"Deep Think REJECT: {reject_reason}")
+                        # Feed rejection back as "previous results" so Jim adapts next cycle
+                        self._cycle_learnings.append(
+                            f"DEEP THINK REJECTED cycle {self.cycle} plan: {reject_reason}. "
+                            f"Jim must fundamentally revise the approach."
+                        )
+                        checkpoint.cycle_learnings = list(self._cycle_learnings)
+                        save_checkpoint(cycle_dir, checkpoint)
+                        self.event_bus.emit_simple(
+                            EventType.CYCLE_COMPLETED, cycle=self.cycle,
+                            verdict="REJECT", halted_at_stage=2,
+                        )
+                        return result
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Could not parse Deep Think JSON for REJECT gate: %s", e)
 
             # Create implementation branch before Stage 3 modifies files.
             # If stress tests fail, we can cleanly discard the branch.
@@ -362,9 +487,49 @@ class Orchestrator:
                     runner=self.runner,
                     deep_think_path=deep_think_path,
                 )
+                _s3_elapsed = time.time() - _s3_start
+                # Context exhaustion detection — if Claude's output is suspiciously short,
+                # retry with a trimmed prompt (80% of Deep Think plan + focus note).
+                impl_content = impl_path.read_text(encoding="utf-8")
+                if detect_context_exhaustion(impl_content, stage_number=3):
+                    logger.warning(
+                        "CONTEXT EXHAUSTION suspected in Stage 3 (%d chars) — retrying with trimmed prompt",
+                        len(impl_content),
+                    )
+                    impl_path.unlink(missing_ok=True)
+                    full_plan = deep_think_path.read_text(encoding="utf-8")
+                    # Trim at a paragraph boundary to avoid breaking JSON/code blocks
+                    trim_target = int(len(full_plan) * 0.8)
+                    # Find the last paragraph break (\n\n) before the 80% mark
+                    cut_point = full_plan.rfind("\n\n", 0, trim_target)
+                    if cut_point < len(full_plan) * 0.5:
+                        # No good paragraph break found — fall back to raw cut
+                        cut_point = trim_target
+                    trimmed_plan = full_plan[:cut_point] + (
+                        "\n\n---\nIMPORTANT: Focus on the most critical changes only. "
+                        "The previous attempt was truncated. Prioritize correctness over completeness.\n"
+                    )
+                    trimmed_path = cycle_dir / "02-deep-think-verification-trimmed.md"
+                    atomic_write(trimmed_path, trimmed_plan)
+                    impl_path = stage_3_implement.run(
+                        cycle_dir=cycle_dir,
+                        config=self.config,
+                        runner=self.runner,
+                        deep_think_path=trimmed_path,
+                    )
+                    # Validate retry output — don't accept garbage
+                    retry_content = impl_path.read_text(encoding="utf-8")
+                    if detect_context_exhaustion(retry_content, stage_number=3):
+                        logger.warning(
+                            "CONTEXT EXHAUSTION persists after retry (%d chars) — proceeding with truncated output",
+                            len(retry_content),
+                        )
+                    _s3_elapsed = time.time() - _s3_start
+
+                _record_stage(3, impl_path, _s3_elapsed)
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=3,
-                    output_path=str(impl_path), elapsed=round(time.time() - _s3_start, 1),
+                    output_path=str(impl_path), elapsed=round(_s3_elapsed, 1),
                 )
             result["stages_completed"].append("claude_implement")
             result["changes_applied"] = impl_path.read_text(encoding="utf-8")[:5000]
@@ -393,9 +558,11 @@ class Orchestrator:
                     implementation_path=impl_path,
                     deep_think_path=deep_think_path,
                 )
+                _s4_elapsed = time.time() - _s4_start
+                _record_stage(4, review_path, _s4_elapsed)
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=4,
-                    output_path=str(review_path), elapsed=round(time.time() - _s4_start, 1),
+                    output_path=str(review_path), elapsed=round(_s4_elapsed, 1),
                 )
             result["stages_completed"].append("claude_review")
 
@@ -417,9 +584,11 @@ class Orchestrator:
                     deep_think_path=deep_think_path,
                     codebase=codebase_snapshot,
                 )
+                _s5_elapsed = time.time() - _s5_start
+                _record_stage(5, consensus_path, _s5_elapsed)
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=5,
-                    output_path=str(consensus_path), elapsed=round(time.time() - _s5_start, 1),
+                    output_path=str(consensus_path), elapsed=round(_s5_elapsed, 1),
                 )
             result["stages_completed"].append("consensus")
 
@@ -441,9 +610,11 @@ class Orchestrator:
                     claude_review_path=review_path,
                     jim_review_path=cycle_dir / "05a-jim-independent-review.md",
                 )
+                _s6_elapsed = time.time() - _s6_start
+                _record_stage(6, fixes_path, _s6_elapsed)
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=6,
-                    output_path=str(fixes_path), elapsed=round(time.time() - _s6_start, 1),
+                    output_path=str(fixes_path), elapsed=round(_s6_elapsed, 1),
                 )
             result["stages_completed"].append("apply_fixes")
 
@@ -467,9 +638,11 @@ class Orchestrator:
                 fixes_path=fixes_path,
                 codebase=codebase_snapshot,
             )
+            _s7_elapsed = time.time() - _s7_start
+            _record_stage(7, stress_path, _s7_elapsed)
             self.event_bus.emit_simple(
                 EventType.STAGE_COMPLETED, cycle=self.cycle, stage=7,
-                output_path=str(stress_path), elapsed=round(time.time() - _s7_start, 1),
+                output_path=str(stress_path), elapsed=round(_s7_elapsed, 1),
             )
             result["stages_completed"].append("stress_test")
             stress_content = stress_path.read_text(encoding="utf-8")
@@ -538,6 +711,11 @@ class Orchestrator:
                 self._cycle_learnings.append(learning[:500])
                 # Cap at 10 most recent learnings
                 self._cycle_learnings = self._cycle_learnings[-10:]
+
+            # Persist cycle learnings to checkpoint (survives pipeline restarts)
+            checkpoint.cycle_learnings = list(self._cycle_learnings)
+            checkpoint.status = "completed"
+            save_checkpoint(cycle_dir, checkpoint)
 
             # Git branch isolation: merge on PASS, revert on FAIL/UNCLEAR
             if impl_branch and self.config.git_checkpoint:
@@ -983,5 +1161,5 @@ class Orchestrator:
         lines.append("```")
 
         report = "\n".join(lines)
-        report_path.write_text(report, encoding="utf-8")
+        atomic_write(report_path, report)
         return report_path

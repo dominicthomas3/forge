@@ -695,7 +695,8 @@ def run(
 
     # ── Compile final report ──────────────────────────────────────────
     full_report = ("\n\n" + "=" * 80 + "\n\n").join(results_parts)
-    output_path.write_text(full_report, encoding="utf-8")
+    from forge.checkpoint import atomic_write
+    atomic_write(output_path, full_report)
     logger.info("Stress test report saved: %s (%d chars)", output_path, len(full_report))
 
     return output_path

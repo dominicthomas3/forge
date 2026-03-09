@@ -90,6 +90,55 @@ Write code that would pass a senior engineer's code review.
 - If the plan asks for X but you discover X would break something, explain why and propose an alternative.
 - Always end with a summary of what you did and any issues discovered.
 
+## PYTHON-SPECIFIC INTELLIGENCE
+
+### Import Ordering
+Always follow: stdlib → third-party → local, separated by blank lines.
+```python
+from __future__ import annotations  # Always first
+
+import logging                       # stdlib
+import os
+from pathlib import Path
+
+import httpx                         # third-party
+
+from forge.config import ForgeConfig  # local
+```
+
+### __init__.py Awareness
+- Before creating a new module, check if the target package has `__init__.py`.
+- Never clobber an existing `__all__` list — extend it if needed.
+- Check if the package uses lazy imports or re-exports before adding new ones.
+
+### Circular Import Prevention
+- If module A needs types from module B and B imports A: use `TYPE_CHECKING` guard.
+- Prefer late/deferred imports (`from X import Y` inside a function) over top-level
+  when dealing with mutual dependencies.
+- Before adding any import, grep for the reverse import (`grep "from A import" B`).
+
+### Common Anti-Patterns to Avoid
+- **Mutable default args**: `def f(items=[])` → `def f(items=None): items = items or []`
+- **Bare except**: `except:` → `except Exception:` (never swallow KeyboardInterrupt)
+- **String concatenation in loops**: Use `"".join()` or f-strings
+- **`is` for value comparison**: `x is 0` → `x == 0` (use `is` only for None/singletons)
+- **Shadowing builtins**: Don't name variables `type`, `id`, `input`, `list`, `dict`
+
+### Pre-Change Checklist
+Before modifying ANY file:
+1. All new imports resolve (no circular deps, no missing modules)
+2. Type hints on all new function signatures
+3. Error handling at system boundaries (file I/O, network, subprocess)
+4. No hardcoded file paths (use Path objects, config values)
+5. No mutable default arguments
+6. Run py_compile after each file edit
+
+### Confidence Scoring
+For each change you make, indicate your confidence:
+- **CERTAIN**: I verified this is correct by reading the code and its callers
+- **LIKELY**: Logic is sound but I couldn't verify all call sites
+- **EXPERIMENTAL**: This might break something — flag for review in Stage 4
+
 ---
 TASK BEGINS BELOW
 ---
@@ -256,6 +305,67 @@ JIM_ANALYSIS_SUPPLEMENT = """\
 - For each proposed change, answer: "If this change introduces a bug, how would we detect it?"
 - Flag any files >500 lines — they're harder to modify safely and may need focused attention.
 - If the task is ambiguous, interpret it conservatively. It's better to do less correctly than more incorrectly.
+"""
+
+JIM_REASONING_PROTOCOL = """\
+## MANDATORY REASONING PROTOCOL
+
+Before proposing ANY change, you MUST complete these sections IN ORDER.
+Skipping a section invalidates your entire analysis.
+
+### SECTION A: CONSTRAINT DISCOVERY
+List everything that CANNOT change:
+- Public API signatures (function names, parameters, return types)
+- Configuration schema (keys, types, defaults)
+- External interface contracts (HTTP endpoints, WebSocket messages, CLI args)
+- Database schema (tables, columns, foreign keys)
+- File format contracts (config files, data files consumed by other tools)
+
+Format each constraint as:
+- [file:function_or_class] — [what must not change] — [why]
+
+### SECTION B: DATA FLOW TRACE
+For EACH proposed change, trace the complete data flow:
+- **Input**: Where does data enter this function? (callers, API, file, env var)
+- **Processing**: What transformations happen?
+- **Output**: Where does data go? (return value, side effect, file write)
+- **Callers**: List EVERY function/file that calls this one
+
+Format:
+```
+FLOW: [function_name]
+  IN:  [caller1] → [this_function]
+  OUT: [this_function] → [downstream1]
+  CALLERS: [file1:line, file2:line]
+```
+
+### SECTION C: CHANGE IMPACT MATRIX
+For EVERY file you propose to modify:
+
+| File | Change | Direct Dependents | Risk Level | Rollback Strategy |
+|------|--------|-------------------|------------|-------------------|
+
+### SECTION D: STRUCTURED IMPLEMENTATION PLAN
+Output your plan as a JSON block that Deep Think can parse:
+
+```json
+{
+  "changes": [
+    {
+      "order": 1,
+      "file": "path/to/file.py",
+      "action": "modify",
+      "target": "function_or_class_name",
+      "description": "what to change",
+      "risk": "LOW",
+      "depends_on": [],
+      "verification": "how to verify correctness"
+    }
+  ]
+}
+```
+
+After completing all 4 sections, proceed with your full analysis.
 """
 
 JIM_REVIEW_SUPPLEMENT = """\

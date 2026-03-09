@@ -91,7 +91,8 @@ def run(
     # Run Claude Code with file access — moderate timeout
     result = runner.run_claude(prompt, timeout=900, blueprint="full")
 
-    output_path.write_text(result, encoding="utf-8")
+    from forge.checkpoint import atomic_write
+    atomic_write(output_path, result)
     logger.info("Fixes applied log saved: %s (%d chars)", output_path, len(result))
 
     return output_path

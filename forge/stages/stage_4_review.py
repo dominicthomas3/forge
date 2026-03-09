@@ -104,7 +104,8 @@ def run(
     # Review doesn't edit files — compact blueprint (quality standards, no tool guidance)
     result = runner.run_claude(prompt, timeout=600, needs_filesystem=False, blueprint="compact")
 
-    output_path.write_text(result, encoding="utf-8")
+    from forge.checkpoint import atomic_write
+    atomic_write(output_path, result)
     logger.info("Claude review saved: %s (%d chars)", output_path, len(result))
 
     return output_path

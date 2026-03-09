@@ -9,9 +9,12 @@ On cycle 2+: Analyzes previous cycle's stress test results + remaining issues.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from pathlib import Path
 
+from forge.checkpoint import atomic_write
 from forge.codebase import load_codebase
 from forge.config import ForgeConfig
 from forge.runner import Runner
@@ -171,9 +174,9 @@ def run(
             codebase=codebase,
         )
 
-    # Inject stage-specific supplement
-    from forge.worker_blueprint import JIM_ANALYSIS_SUPPLEMENT
-    prompt = JIM_ANALYSIS_SUPPLEMENT + "\n" + prompt
+    # Inject stage-specific supplement + mandatory reasoning protocol
+    from forge.worker_blueprint import JIM_ANALYSIS_SUPPLEMENT, JIM_REASONING_PROTOCOL
+    prompt = JIM_REASONING_PROTOCOL + "\n" + JIM_ANALYSIS_SUPPLEMENT + "\n" + prompt
 
     # Inject cross-cycle learning context (accumulated from previous cycles)
     if cycle_learnings:
@@ -187,8 +190,34 @@ def run(
     # Run Jim (Gemini 3.1 Pro) with full intelligence blueprint
     result = runner.run_gemini(prompt, blueprint="full")
 
-    # Save output
-    output_path.write_text(result, encoding="utf-8")
+    # Save output (atomic write prevents corruption on crash)
+    atomic_write(output_path, result)
     logger.info("Jim analysis saved: %s (%d chars)", output_path, len(result))
 
+    # Extract structured implementation plan from Jim's JSON block (if present)
+    structured_plan = _extract_structured_plan(result)
+    if structured_plan:
+        plan_path = cycle_dir / "01-jim-structured-plan.json"
+        atomic_write(plan_path, json.dumps(structured_plan, indent=2))
+        logger.info("Jim structured plan extracted: %d changes", len(structured_plan.get("changes", [])))
+    else:
+        logger.info("Jim did not produce a parseable structured plan — Deep Think will work from free text")
+
     return output_path
+
+
+def _extract_structured_plan(jim_output: str) -> dict | None:
+    """Extract the JSON implementation plan from Jim's analysis.
+
+    Looks for a ```json block containing a "changes" array.
+    Returns the parsed dict, or None if not found/invalid.
+    """
+    json_blocks = re.findall(r'```json\s*\n(.*?)```', jim_output, re.DOTALL)
+    for block in json_blocks:
+        try:
+            parsed = json.loads(block.strip())
+            if isinstance(parsed, dict) and "changes" in parsed:
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None

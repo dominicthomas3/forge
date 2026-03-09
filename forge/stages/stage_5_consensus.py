@@ -230,7 +230,8 @@ def run(
     jim_review = runner.run_gemini(prompt, blueprint="full")
 
     # Save Jim's independent review separately
-    jim_independent_path.write_text(jim_review, encoding="utf-8")
+    from forge.checkpoint import atomic_write
+    atomic_write(jim_independent_path, jim_review)
     logger.info("Jim independent review saved: %s (%d chars)", jim_independent_path, len(jim_review))
 
     # ── Phase B: Programmatic intersection ───────────────────────────
@@ -245,7 +246,7 @@ def run(
         + jim_review[:5000]
     )
 
-    output_path.write_text(full_report, encoding="utf-8")
+    atomic_write(output_path, full_report)
     logger.info("Consensus report saved: %s (%d chars)", output_path, len(full_report))
 
     return output_path
