@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Forge — Run the overnight autonomous development pipeline.
+r"""Forge — Run the overnight autonomous development pipeline.
 
 Usage:
     # With inline task description
