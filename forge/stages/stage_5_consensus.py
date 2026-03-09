@@ -138,6 +138,21 @@ def _compute_consensus(
         lines.append("### NO AGREED FIXES")
         lines.append("Jim and Claude did not independently flag any of the same files.")
 
+    # Severity-weighted escalation: CRITICAL findings from either model
+    # should still proceed even without consensus (too dangerous to ignore).
+    critical_pattern = re.compile(r'\*\*Severity\*\*:\s*CRITICAL', re.IGNORECASE)
+    critical_claude = critical_pattern.findall(claude_review)
+    critical_jim = critical_pattern.findall(jim_review)
+    if (critical_claude or critical_jim) and not agreed_files:
+        lines.append("")
+        lines.append("### CRITICAL SEVERITY ESCALATION")
+        lines.append("One or both reviewers found CRITICAL issues. These proceed even without consensus:")
+        if critical_claude:
+            lines.append(f"- Claude found {len(critical_claude)} CRITICAL issue(s)")
+        if critical_jim:
+            lines.append(f"- Jim found {len(critical_jim)} CRITICAL issue(s)")
+        lines.append("*Stage 6 should address CRITICAL findings from either reviewer.*")
+
     lines.append("")
 
     if claude_only:
@@ -153,9 +168,13 @@ def _compute_consensus(
         lines.append("")
 
     # Overall verdict
+    has_critical = bool(critical_claude or critical_jim)
     if agreed_files:
         lines.append("### OVERALL VERDICT: READY FOR FIXES")
         lines.append(f"{len(agreed_files)} agreed file(s) should be fixed in Stage 6.")
+    elif has_critical:
+        lines.append("### OVERALL VERDICT: CRITICAL ESCALATION — FIX REQUIRED")
+        lines.append("No file consensus, but CRITICAL issues found. Stage 6 must address them.")
     elif claude_only or jim_only:
         lines.append("### OVERALL VERDICT: NEEDS CAREFUL REVIEW")
         lines.append("No consensus — only single-model findings. Proceed cautiously.")

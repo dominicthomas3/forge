@@ -130,17 +130,23 @@ TASK BEGINS BELOW
 STAGE_3_SUPPLEMENT = """\
 ## IMPLEMENTATION STAGE SPECIFICS
 - You are Stage 3. Deep Think has verified the plan — trust it, but verify edge cases.
+- **TEST FIRST**: Before making changes, run existing tests (`python -m pytest` or project-specific
+  test command) to establish a baseline. If tests already fail, note which ones.
 - After EVERY file change, re-read the file to confirm the edit applied correctly.
 - Run `python -m py_compile <file>` after editing any .py file.
 - If the plan specifies creating a new file, check if a similar file already exists first.
 - Git commit after completing each logical unit of work.
+- After all changes, run the test suite again. Any NEW failures are your responsibility.
 """
 
 STAGE_6_SUPPLEMENT = """\
 ## FIX APPLICATION SPECIFICS
 - You are Stage 6. Apply ONLY the consensus-agreed fixes — nothing more.
+- **DEPENDENCY ORDER**: Before applying fixes, scan for dependencies between them.
+  If fix A depends on fix B (e.g., B creates the import that A uses), apply B first.
 - Do NOT refactor, optimize, or "improve" code beyond what was agreed.
 - After each fix, verify the fix actually resolves the issue (re-read + compile check).
+- After ALL fixes are applied, run the test suite. If tests fail, report which fix caused it.
 - If a fix would break something else, skip it and explain why.
 """
 
@@ -149,6 +155,9 @@ STAGE_7_SUPPLEMENT = """\
 - You are Stage 7. Your job is to BREAK things, not fix them.
 - Run actual commands — don't just reason about what might fail.
 - Test imports, type checks, lint, and actual functionality.
+- **PERFORMANCE REGRESSION**: Measure import time of modified modules (`python -c "import time; ..."`).
+  If any module takes >2s to import, flag as HIGH severity performance regression.
+- **INTEGRATION**: Test that callers of modified functions still work (import and call).
 - Report failures precisely: file, line, error message, severity.
 - If everything passes, say so — don't invent problems.
 """
