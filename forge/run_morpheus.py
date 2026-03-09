@@ -75,10 +75,23 @@ async def run_session(args, config: ForgeConfig) -> None:
     runner = Runner(config)
     morpheus = Morpheus(config=config, runner=runner)
 
-    report = await morpheus.run_session(
-        exchanges_per_category=args.exchanges,
-        categories=args.categories,
-    )
+    # Check for targeted session (meta-loop mode)
+    if args.targeting_config and Path(args.targeting_config).exists():
+        import json as _json
+        targeting = _json.loads(Path(args.targeting_config).read_text(encoding="utf-8"))
+        report = await morpheus.run_session_targeted(
+            targeting_config=targeting,
+            previous_tasks=None,  # Meta-orchestrator handles this externally
+        )
+    else:
+        report = await morpheus.run_session(
+            exchanges_per_category=args.exchanges,
+            categories=args.categories,
+        )
+
+    # Export JSON if requested (meta-loop mode)
+    if args.meta_json_output:
+        morpheus.export_json(report, Path(args.meta_json_output))
 
     print("\n" + "=" * 60)
     print("  MORPHEUS SESSION COMPLETE")
@@ -138,6 +151,15 @@ Cost: ~$0.003-0.005 per exchange (Spectre API). Generation + evaluation: $0 (sub
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Validate configuration and exit",
+    )
+    # Meta-loop integration flags
+    parser.add_argument(
+        "--targeting-config", type=str, default=None,
+        help="Path to MorpheusTargetingConfig JSON (targeted session mode)",
+    )
+    parser.add_argument(
+        "--meta-json-output", type=str, default=None,
+        help="Path to write structured JSON report (for meta-loop consumption)",
     )
 
     args = parser.parse_args()

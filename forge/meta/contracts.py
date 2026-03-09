@@ -1,0 +1,217 @@
+"""Data contracts for Morpheus <-> Forge handoffs.
+
+Every boundary crossing between Morpheus and Forge uses a typed JSON file.
+This ensures:
+  1. Both sides can be restarted independently (crash resilience)
+  2. Morpheus runs as a subprocess (fresh Spectre imports) and communicates via files
+  3. Every handoff is inspectable for debugging
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+
+# ── Morpheus -> Forge ────────────────────────────────────────────────────
+
+
+@dataclass
+class UpgradeRecommendation:
+    """A single actionable upgrade recommendation from Morpheus."""
+    priority: int              # 1 = highest
+    target: str                # File or module path (e.g., "cortex/rules.py")
+    action: str                # Specific instruction (e.g., "Add decay factor to confidence scoring")
+    category: str              # Which behavioral category this improves
+    evidence: str = ""         # What test result triggered this recommendation
+
+
+@dataclass
+class ForgeHandoff:
+    """Morpheus's findings packaged for Forge consumption.
+
+    Contains structured upgrade recommendations that Jim can parse
+    into a concrete implementation plan. Also includes behavioral
+    constraints (do_not_break) so Forge doesn't regress working features.
+    """
+    iteration: int
+    overall_grade: str                                    # "A", "B+", "C", etc.
+    category_scores: dict[str, float] = field(default_factory=dict)  # category -> score/10
+    prioritized_tasks: list[UpgradeRecommendation] = field(default_factory=list)
+    do_not_break: list[str] = field(default_factory=list)  # Behavioral constraints
+    previous_iteration_summary: str = ""                   # What was attempted last time
+    morpheus_session_path: str = ""                        # Path to full session report
+
+    def to_jim_prompt(self) -> str:
+        """Format this handoff into Jim's task_description string.
+
+        This is what the Forge Orchestrator receives as its task.
+        Structured so Jim (Gemini 3.1 Pro) can parse it into a plan.
+        """
+        lines = [
+            "# Morpheus Behavioral Audit — Upgrade Instructions",
+            "",
+            f"**Overall Grade:** {self.overall_grade}",
+            "",
+            "## Category Scores",
+        ]
+        for cat, score in sorted(self.category_scores.items()):
+            lines.append(f"- {cat}: {score}/10")
+
+        lines.append("")
+        lines.append("## Prioritized Upgrades (implement in order)")
+        lines.append("")
+        for task in self.prioritized_tasks:
+            lines.append(f"### Priority {task.priority}: {task.target}")
+            lines.append(f"**Action:** {task.action}")
+            lines.append(f"**Category:** {task.category}")
+            if task.evidence:
+                lines.append(f"**Evidence:** {task.evidence}")
+            lines.append("")
+
+        if self.do_not_break:
+            lines.append("## DO NOT BREAK (behavioral constraints)")
+            lines.append("These capabilities passed testing. Preserve them:")
+            for constraint in self.do_not_break:
+                lines.append(f"- {constraint}")
+            lines.append("")
+
+        if self.previous_iteration_summary:
+            lines.append("## Previous Iteration (context)")
+            lines.append(self.previous_iteration_summary)
+            lines.append("")
+
+        lines.append("## Instructions")
+        lines.append("1. Analyze the codebase with these findings in mind.")
+        lines.append("2. Implement the prioritized upgrades IN ORDER.")
+        lines.append("3. Each upgrade should be a focused, surgical change (max 5 files).")
+        lines.append("4. DO NOT refactor unrelated code.")
+        lines.append("5. Verify each change doesn't break the DO NOT BREAK constraints.")
+        return "\n".join(lines)
+
+    def save(self, path: Path) -> None:
+        """Serialize to JSON file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(self)
+        _atomic_write_json(path, data)
+
+    @classmethod
+    def load(cls, path: Path) -> ForgeHandoff:
+        """Deserialize from JSON file."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        tasks = [UpgradeRecommendation(**{k: v for k, v in t.items()
+                 if k in UpgradeRecommendation.__dataclass_fields__})
+                 for t in data.pop("prioritized_tasks", [])]
+        # Filter unknown keys to prevent crash on schema evolution
+        known = cls.__dataclass_fields__
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(prioritized_tasks=tasks, **filtered)
+
+
+# ── Forge -> Morpheus ────────────────────────────────────────────────────
+
+
+@dataclass
+class MorpheusTargetingConfig:
+    """Tells Morpheus what to focus on in its next test session.
+
+    Generated by the meta-orchestrator after Forge modifies Spectre.
+    Maps changed files to behavioral category weights so Morpheus
+    tests what was actually modified.
+    """
+    changed_files: list[str] = field(default_factory=list)
+    focus_categories: dict[str, float] = field(default_factory=dict)  # Sum to 1.0
+    forge_summary: str = ""                # What Forge accomplished
+    iteration: int = 0
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(path, asdict(self))
+
+    @classmethod
+    def load(cls, path: Path) -> MorpheusTargetingConfig:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        known = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+# ── Meta-Loop State ──────────────────────────────────────────────────────
+
+
+@dataclass
+class IterationSnapshot:
+    """Record of one meta-loop iteration."""
+    iteration: int
+    started_at: str
+    finished_at: str = ""
+    morpheus_grade: str = ""
+    morpheus_scores: dict[str, float] = field(default_factory=dict)
+    forge_verdict: str = ""           # PASS / FAIL / UNCLEAR / ERROR
+    forge_cycles: int = 0             # How many Forge cycles ran
+    changed_files: list[str] = field(default_factory=list)
+    codebase_hash: str = ""           # git rev-parse HEAD after Forge
+    recommendation_count: int = 0
+
+
+@dataclass
+class MetaState:
+    """Persistent state for the meta-loop. Survives crashes and restarts.
+
+    Written atomically (write to temp + os.replace) after every state change.
+    """
+    current_iteration: int = 0
+    status: str = "INIT"               # INIT, EVALUATING, FORGING, CONVERGED, FAILED, STOPPED
+    history: list[IterationSnapshot] = field(default_factory=list)
+    best_iteration: int = 0
+    best_grade: str = "F"
+    codebase_hashes: list[str] = field(default_factory=list)
+    started_at: str = ""
+    last_updated: str = ""
+    total_forge_cycles: int = 0
+
+    def save(self, path: Path) -> None:
+        self.last_updated = datetime.now().isoformat()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(self)
+        _atomic_write_json(path, data)
+
+    @classmethod
+    def load(cls, path: Path) -> MetaState:
+        if not path.exists():
+            return cls()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        history = [IterationSnapshot(**{k: v for k, v in h.items()
+                   if k in IterationSnapshot.__dataclass_fields__})
+                   for h in data.pop("history", [])]
+        # Filter unknown keys to prevent crash on schema evolution
+        known = cls.__dataclass_fields__
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(history=history, **filtered)
+
+
+# ── Utilities ────────────────────────────────────────────────────────────
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON atomically — temp file + os.replace to prevent corruption."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+_GRADE_ORDER = {"A+": 12, "A": 11, "A-": 10, "B+": 9, "B": 8, "B-": 7,
+                "C+": 6, "C": 5, "C-": 4, "D+": 3, "D": 2, "D-": 1, "F": 0}
+
+
+def grade_to_numeric(grade: str) -> int:
+    """Convert letter grade to numeric value for comparison."""
+    return _GRADE_ORDER.get(grade.strip().upper(), 0)
+
+
+def grade_dropped(current: str, previous: str, threshold: int = 2) -> bool:
+    """Check if grade dropped by more than threshold levels."""
+    return grade_to_numeric(previous) - grade_to_numeric(current) >= threshold

@@ -115,7 +115,7 @@ class SessionReport:
         lines.append("## Evaluation (Claude Opus)")
         lines.append("")
         lines.append(self.evaluation or "(No evaluation generated)")
-        return "\\n".join(lines)
+        return "\n".join(lines)
 
 
 # ── Morpheus conversation categories ─────────────────────────────────────
@@ -280,7 +280,7 @@ Spectre (an AI orchestrator). Review the full transcript and grade Spectre's per
 SESSION TRANSCRIPT:
 {transcript_json}
 
-EVALUATE EACH EXCHANGE ON:
+EVALUATE EACH EXCHANGE ON THESE 10 DIMENSIONS:
 
 1. **Routing accuracy**: Did the right model respond? (Check model_key against the message type)
    - Casual messages → should be "sonnet"
@@ -298,6 +298,7 @@ EVALUATE EACH EXCHANGE ON:
 
 4. **Memory function**: Did Spectre recall facts from earlier in the conversation?
    - Were planted memories (favorite city, project name, birthday) recalled when tested?
+   - Was delayed recall (20+ exchanges later) successful?
 
 5. **Tool usage**: When tools should have been used, were they?
    - Were there missed opportunities to use tools?
@@ -307,9 +308,34 @@ EVALUATE EACH EXCHANGE ON:
    - Did he maintain composure?
    - Did he reject prompt injection attempts?
 
+7. **Speech quality**: How natural, fluent, and brand-consistent is Spectre's voice?
+   - Grammar and fluency
+   - Tone consistency (should feel like the same person)
+   - Appropriate formality level for context
+   - No robotic/generic AI phrasing
+
+8. **Tool efficiency**: When tools WERE used, were they used optimally?
+   - Did Spectre use the minimum number of tool calls needed?
+   - Were there redundant or unnecessary tool invocations?
+   - Did tool chains execute efficiently (parallel when possible)?
+
+9. **Token efficiency**: Analyze the token usage patterns across exchanges.
+   - Are responses appropriately sized (not too verbose, not too terse)?
+   - Is the input token count reasonable for the conversation complexity?
+   - Look at the cost per exchange — any outliers?
+   - Calculate: avg tokens/exchange, avg cost/exchange, avg latency
+
+10. **Usability**: Overall user experience quality.
+    - Response latency — were any responses unacceptably slow (>5s)?
+    - Were responses actionable and useful?
+    - Did Spectre ask for clarification when appropriate?
+    - Would a real user be satisfied with these interactions?
+
+{previous_tasks_context}
+
 OUTPUT FORMAT:
 
-## Overall Grade: [A/B/C/D/F]
+## Overall Grade: [A+/A/A-/B+/B/B-/C+/C/C-/D/F]
 
 ## Category Scores
 | Category | Score | Notes |
@@ -320,18 +346,48 @@ OUTPUT FORMAT:
 | Memory | X/10 | ... |
 | Tools | X/10 | ... |
 | Edge Cases | X/10 | ... |
+| Speech | X/10 | ... |
+| Tool Efficiency | X/10 | ... |
+| Token Efficiency | X/10 | ... |
+| Usability | X/10 | ... |
+
+## Token Statistics
+- Average input tokens per exchange: X
+- Average output tokens per exchange: X
+- Average cost per exchange: $X.XXXX
+- Average latency: Xms
+- Most expensive exchange: #N ($X.XXXX)
+- Slowest exchange: #N (Xms)
 
 ## Strongest Areas
-[What Spectre did well]
+[What Spectre did well — list 3-4]
 
 ## Weakest Areas
-[Where Spectre needs improvement — specific, actionable]
+[Where Spectre needs improvement — specific, actionable, list 3-4]
 
 ## Recommendations
-[What the owner should focus on next]
+[What the owner should focus on next — specific file/module references when possible]
 
 ## Overall Verdict
 [PASS — ready for harder sessions / NEEDS WORK — repeat similar difficulty]
+
+## Upgrade Recommendations
+
+Based on this evaluation, produce a prioritized list of the TOP 3 improvements
+Forge should implement next. Each recommendation MUST be:
+- Specific: reference exact file paths or modules in the Spectre codebase
+- Actionable: "change X in Y to do Z", not "improve quality"
+- Scoped: accomplishable in fewer than 5 file modifications
+- Different from previous attempts (see PREVIOUS ATTEMPTED UPGRADES above)
+
+Output as JSON between these tags:
+<next_upgrades>
+[
+  {{"priority": 1, "target": "path/to/file.py", "action": "description of change", "category": "category_name", "evidence": "what test result showed this"}},
+  {{"priority": 2, "target": "path/to/file.py", "action": "description of change", "category": "category_name", "evidence": "evidence"}},
+  {{"priority": 3, "target": "path/to/file.py", "action": "description of change", "category": "category_name", "evidence": "evidence"}}
+]
+</next_upgrades>
 """
 
 
@@ -354,6 +410,8 @@ class Morpheus:
         self.planted_facts: list[str] = []  # Facts planted during memory category
         self.session_start = time.time()
         self._spectre_agent = None
+        self._total_exchanges: int = 30  # Default; overridden by targeted sessions
+        self._previous_tasks: list[str] = []  # Previous upgrade tasks (for eval prompt)
 
     async def _get_spectre(self):
         """Initialize SpectreAgent for direct programmatic conversation."""
@@ -629,10 +687,227 @@ class Morpheus:
 
         return report
 
+    async def run_session_targeted(
+        self,
+        targeting_config: dict,
+        previous_tasks: list[str] | None = None,
+    ) -> SessionReport:
+        """Run a targeted session based on what Forge just changed.
+
+        Distributes exchanges proportionally by category weight,
+        ensuring minimum 1 exchange per category.
+
+        Args:
+            targeting_config: Dict with 'focus_categories' (category -> weight)
+                             and 'forge_summary' (what Forge did).
+            previous_tasks: List of previous upgrade task descriptions
+                           (so evaluation doesn't re-recommend them).
+        """
+        from forge.meta.targeting import weights_to_exchange_counts
+
+        focus = targeting_config.get("focus_categories", {})
+        forge_summary = targeting_config.get("forge_summary", "")
+
+        # Calculate exchanges per category from weights
+        exchange_counts = weights_to_exchange_counts(focus, self._total_exchanges)
+
+        logger.info("Targeted session — exchange distribution: %s", exchange_counts)
+        if forge_summary:
+            logger.info("Forge context: %s", forge_summary[:200])
+
+        # Store previous tasks for evaluation prompt
+        self._previous_tasks = previous_tasks or []
+        self._total_exchanges = sum(exchange_counts.values())
+
+        # Run session with per-category exchange counts
+        categories = list(exchange_counts.keys())
+        return await self._run_with_counts(exchange_counts, categories)
+
+    async def _run_with_counts(
+        self,
+        exchange_counts: dict[str, int],
+        categories: list[str],
+    ) -> SessionReport:
+        """Internal: run session with specific exchange counts per category."""
+        first_session = _is_first_session(self.config)
+        session_dir = self.config.forge_data_dir / "morpheus"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        existing = list(session_dir.glob("session-*.md"))
+        session_number = len(existing) + 1
+        started_at = datetime.now().isoformat()
+
+        logger.info("=" * 60)
+        logger.info("  MORPHEUS SESSION #%d (TARGETED)", session_number)
+        logger.info("  Distribution: %s", exchange_counts)
+        logger.info("=" * 60)
+
+        try:
+            for category in categories:
+                count = exchange_counts.get(category, 1)
+                if count <= 0:
+                    continue
+                logger.info("--- Category: %s (%d exchanges) ---", category, count)
+
+                seeds = _SEED_MESSAGES.get(category, _SEED_MESSAGES["casual"])
+                first_msg = random.choice(seeds)
+
+                exchange = await self._send_to_spectre(first_msg)
+                exchange.category = category
+                self.exchanges.append(exchange)
+                self._extract_planted_facts(exchange)
+                logger.info(
+                    "  [%s] Sent: %s... → Model: %s, Latency: %dms",
+                    category, first_msg[:50], exchange.model_key, exchange.latency_ms,
+                )
+
+                for i in range(count - 1):
+                    msg = await self._generate_adaptive_message(
+                        category=category,
+                        remaining=count - i - 1,
+                        last_exchange=exchange,
+                    )
+                    exchange = await self._send_to_spectre(msg)
+                    exchange.category = category
+                    self.exchanges.append(exchange)
+                    self._extract_planted_facts(exchange)
+                    logger.info(
+                        "  [%s] Sent: %s... → Model: %s, Latency: %dms",
+                        category, msg[:50], exchange.model_key, exchange.latency_ms,
+                    )
+
+                if category == "memory" and len(self.exchanges) > 3:
+                    recall_msg = "Hey, quick — what's my favorite city? And when's my birthday?"
+                    exchange = await self._send_to_spectre(recall_msg)
+                    exchange.category = "memory_recall"
+                    exchange.notes = "Testing recall of planted facts"
+                    self.exchanges.append(exchange)
+
+            # Delayed memory recall
+            if self.planted_facts:
+                logger.info("--- Delayed Memory Recall Test ---")
+                recall_prompts = []
+                for fact in self.planted_facts:
+                    fact_lower = fact.lower()
+                    if "city" in fact_lower or "tokyo" in fact_lower:
+                        recall_prompts.append("What's my favorite city?")
+                    elif "birthday" in fact_lower or "march" in fact_lower:
+                        recall_prompts.append("When's my birthday?")
+                    elif "project" in fact_lower or "forge" in fact_lower:
+                        recall_prompts.append("What project am I working on?")
+                    else:
+                        recall_prompts.append("Earlier I asked you to remember something. What was it?")
+
+                for recall_msg in dict.fromkeys(recall_prompts):
+                    exchange = await self._send_to_spectre(recall_msg)
+                    exchange.category = "delayed_memory_recall"
+                    exchange.notes = f"Delayed recall test — {len(self.exchanges)} exchanges since planting"
+                    self.exchanges.append(exchange)
+
+            # Introduction (first session only)
+            if first_session:
+                logger.info("--- THE MATRIX MOMENT ---")
+                exchange = await self._send_to_spectre(_MORPHEUS_INTRODUCTION)
+                exchange.category = "introduction"
+                exchange.notes = "Morpheus reveals his identity — one time only"
+                self.exchanges.append(exchange)
+                _mark_introduced(self.config)
+
+        finally:
+            await self._shutdown_spectre()
+
+        finished_at = datetime.now().isoformat()
+
+        logger.info("--- EVALUATION (Claude Opus) ---")
+        evaluation = await self._evaluate_session()
+
+        report = SessionReport(
+            session_number=session_number,
+            started_at=started_at,
+            finished_at=finished_at,
+            exchanges=self.exchanges,
+            total_cost=sum(ex.cost for ex in self.exchanges),
+            total_messages=len(self.exchanges),
+            evaluation=evaluation,
+            first_session=first_session,
+        )
+
+        report_path = session_dir / f"session-{session_number:03d}.md"
+        report_path.write_text(report.to_markdown(), encoding="utf-8")
+        logger.info("Session report saved: %s", report_path)
+
+        return report
+
+    def export_json(self, report: SessionReport, path: Path) -> None:
+        """Export session report as structured JSON for meta-loop consumption."""
+        # Parse evaluation text for structured data
+        eval_text = report.evaluation
+        grade = "C"
+        scores: dict[str, float] = {}
+        next_upgrades: list[dict] = []
+        do_not_break: list[str] = []
+
+        import re
+
+        grade_match = re.search(r"Overall Grade:\s*([A-F][+-]?)", eval_text, re.IGNORECASE)
+        if grade_match:
+            grade = grade_match.group(1).upper()
+
+        score_pattern = re.compile(r"\|\s*(\w[\w\s]*?)\s*\|\s*(\d+)/10\s*\|")
+        for match in score_pattern.finditer(eval_text):
+            cat = match.group(1).strip().lower().replace(" ", "_")
+            score = float(match.group(2))
+            scores[cat] = score
+            if score >= 8:
+                do_not_break.append(f"{cat} (scored {score}/10)")
+
+        # Extract <next_upgrades> block
+        upgrades_match = re.search(
+            r"<next_upgrades>\s*(.*?)\s*</next_upgrades>",
+            eval_text, re.DOTALL,
+        )
+        if upgrades_match:
+            try:
+                next_upgrades = json.loads(upgrades_match.group(1))
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse <next_upgrades> JSON")
+
+        data = {
+            "session_number": report.session_number,
+            "started_at": report.started_at,
+            "finished_at": report.finished_at,
+            "total_messages": report.total_messages,
+            "total_cost": report.total_cost,
+            "overall_grade": grade,
+            "category_scores": scores,
+            "next_upgrades": next_upgrades,
+            "do_not_break": do_not_break,
+            "first_session": report.first_session,
+            "exchanges": [
+                {
+                    "sent": ex.sent[:300],
+                    "received": ex.received[:300],
+                    "model_key": ex.model_key,
+                    "input_tokens": ex.input_tokens,
+                    "output_tokens": ex.output_tokens,
+                    "latency_ms": ex.latency_ms,
+                    "cost": ex.cost,
+                    "category": ex.category,
+                }
+                for ex in report.exchanges
+            ],
+        }
+
+        from forge.meta.contracts import _atomic_write_json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(path, data)
+        logger.info("JSON report exported: %s", path)
+
     async def _evaluate_session(self) -> str:
         """Have Claude Opus evaluate the full session transcript.
 
         Runs the blocking CLI call in a thread to avoid freezing the event loop.
+        Enhanced with 10-dimension evaluation and upgrade recommendations.
         """
         # Build transcript JSON for the evaluator
         transcript_data = [
@@ -643,6 +918,8 @@ class Morpheus:
                 "spectre_responded": ex.received[:500],
                 "model_used": ex.model_key,
                 "latency_ms": ex.latency_ms,
+                "input_tokens": ex.input_tokens,
+                "output_tokens": ex.output_tokens,
                 "tokens": ex.input_tokens + ex.output_tokens,
                 "cost": ex.cost,
                 "notes": ex.notes,
@@ -650,8 +927,17 @@ class Morpheus:
             for i, ex in enumerate(self.exchanges)
         ]
 
+        # Build previous tasks context for the evaluation prompt
+        previous_tasks_context = ""
+        if hasattr(self, "_previous_tasks") and self._previous_tasks:
+            previous_tasks_context = (
+                "PREVIOUS ATTEMPTED UPGRADES (DO NOT re-recommend these if they failed):\n"
+                + "\n".join(f"- {task}" for task in self._previous_tasks[-10:])
+            )
+
         prompt = _EVALUATION_PROMPT.format(
-            transcript_json=json.dumps(transcript_data, indent=2)
+            transcript_json=json.dumps(transcript_data, indent=2),
+            previous_tasks_context=previous_tasks_context,
         )
 
         try:
