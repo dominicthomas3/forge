@@ -43,6 +43,9 @@ class ForgeConfig:
     claude_model: str = "opus"  # Max subscription — use the best
     deep_think_model: str = "gemini-3.1-pro-preview"
 
+    # ─── WORKER INTELLIGENCE ──────────────────────────────────────────────
+    worker_intelligence: bool = True  # Inject blueprint into all Claude calls
+
     # ─── SAFETY RAILS ─────────────────────────────────────────────────────
     max_cycles: int = 50          # Hard cap on build-verify cycles
     max_wall_hours: float = 8.0   # Stop before you wake up

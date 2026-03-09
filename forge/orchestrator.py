@@ -55,6 +55,10 @@ class Orchestrator:
         self.errors: list[str] = []
         self.event_bus = EventBus()
 
+        # Cross-cycle learning memory — accumulates patterns across cycles.
+        # Fed into Jim and Claude blueprints so the pipeline doesn't repeat mistakes.
+        self._cycle_learnings: list[str] = []
+
     # ── Main Loop ─────────────────────────────────────────────────────
 
     def run(self) -> Path:
@@ -293,6 +297,7 @@ class Orchestrator:
                     cycle_number=self.cycle,
                     previous_results=previous_results,
                     codebase=codebase_snapshot,
+                    cycle_learnings=self._cycle_learnings if self._cycle_learnings else None,
                 )
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=1,
@@ -506,6 +511,17 @@ class Orchestrator:
                         if len(remaining) >= 20:
                             break
             result["remaining_issues"] = "\n".join(remaining) if remaining else ""
+
+            # ── Cross-cycle learning ──
+            # Extract patterns from failures so future cycles don't repeat them.
+            if result["stress_verdict"] != "PASS" and remaining:
+                learning = (
+                    f"Cycle {self.cycle}: Stress test found issues — "
+                    + "; ".join(remaining[:5])
+                )
+                self._cycle_learnings.append(learning[:500])
+                # Cap at 10 most recent learnings
+                self._cycle_learnings = self._cycle_learnings[-10:]
 
             # Git branch isolation: merge on PASS, revert on FAIL/UNCLEAR
             if impl_branch and self.config.git_checkpoint:
@@ -931,8 +947,10 @@ class Orchestrator:
             "   CRITICAL: Explain these recommendations using easy-to-understand analogies and a philosophical approach to software engineering (like building a Ferrari or a finely tuned machine).\n\n"
             f"--- LAST CYCLE DETAILS ---\n{last_cycle_details[:30000]}"
         )
+        from forge.worker_blueprint import JIM_REPORT_SUPPLEMENT
+        prompt = JIM_REPORT_SUPPLEMENT + "\n" + prompt
         try:
-            ai_summary = self.runner.run_gemini(prompt, timeout=300)
+            ai_summary = self.runner.run_gemini(prompt, timeout=300, blueprint="compact")
             lines.insert(12, "## AI Executive Summary & Next Steps\n" + ai_summary + "\n")
         except Exception as e:
             logger.warning(f"Failed to generate AI summary: {e}")

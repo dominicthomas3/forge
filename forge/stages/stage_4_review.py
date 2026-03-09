@@ -101,8 +101,8 @@ def run(
         deep_think_plan=deep_think_plan,
     )
 
-    # Review doesn't edit files, but needs enough time to reason through changes
-    result = runner.run_claude(prompt, timeout=600, needs_filesystem=False)
+    # Review doesn't edit files — compact blueprint (quality standards, no tool guidance)
+    result = runner.run_claude(prompt, timeout=600, needs_filesystem=False, blueprint="compact")
 
     output_path.write_text(result, encoding="utf-8")
     logger.info("Claude review saved: %s (%d chars)", output_path, len(result))

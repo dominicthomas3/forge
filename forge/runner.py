@@ -244,10 +244,16 @@ class Runner:
 
     # ── Gemini CLI (Jim) ──────────────────────────────────────────────────
 
-    def run_gemini(self, prompt: str, timeout: int | None = None) -> str:
+    def run_gemini(self, prompt: str, timeout: int | None = None, blueprint: str = "full") -> str:
         """Run Gemini 3.1 Pro via CLI. Pro Ultra subscription — no cost.
 
         Handles long prompts by writing to a temp file and piping via stdin.
+
+        Args:
+            prompt: The prompt text.
+            timeout: Hard timeout in seconds.
+            blueprint: Intelligence level — "full" for analysis, "compact" for
+                reviews/generation, "none" to skip.
         """
         if timeout is None:
             timeout = self.config.gemini_timeout
@@ -255,7 +261,14 @@ class Runner:
         if self._gemini_bin is None:
             self._gemini_bin = self.config.resolve_gemini_cli()
 
-        logger.info("Running Gemini CLI (Jim) — %d chars prompt", len(prompt))
+        # Inject Jim Intelligence Blueprint — teaches Gemini to think step-by-step,
+        # verify claims, cite sources, and challenge its own output.
+        if self.config.worker_intelligence and blueprint != "none":
+            from forge.worker_blueprint import JIM_BLUEPRINT, JIM_BLUEPRINT_COMPACT
+            preamble = JIM_BLUEPRINT if blueprint == "full" else JIM_BLUEPRINT_COMPACT
+            prompt = preamble + prompt
+
+        logger.info("Running Gemini CLI (Jim) — %d chars prompt (blueprint=%s)", len(prompt), blueprint)
 
         # Use a neutral cwd so the Gemini CLI doesn't auto-scan/index the
         # target project.  Jim already receives the full codebase via stdin —
@@ -408,7 +421,13 @@ class Runner:
 
     # ── Claude Code CLI ───────────────────────────────────────────────────
 
-    def run_claude(self, prompt: str, timeout: int | None = None, needs_filesystem: bool = True) -> str:
+    def run_claude(
+        self,
+        prompt: str,
+        timeout: int | None = None,
+        needs_filesystem: bool = True,
+        blueprint: str = "full",
+    ) -> str:
         """Run Claude Code via CLI. Max subscription — no cost.
 
         Args:
@@ -417,6 +436,8 @@ class Runner:
             needs_filesystem: If True, run in target project dir so Claude can
                 edit files.  If False, run in a neutral dir to avoid the CLI
                 auto-loading a huge project into its context.
+            blueprint: Intelligence level — "full" for implementation stages,
+                "compact" for review/evaluation, "none" to skip.
         """
         if timeout is None:
             timeout = self.config.claude_timeout
@@ -427,8 +448,15 @@ class Runner:
         import tempfile
         work_dir = str(self.config.target_project) if needs_filesystem else tempfile.gettempdir()
 
-        logger.info("Running Claude Code CLI — %d chars prompt (cwd=%s)", len(prompt),
-                     "project" if needs_filesystem else "neutral")
+        # Inject Worker Intelligence Blueprint — teaches Claude self-verification,
+        # tool usage, quality standards, and pipeline awareness.
+        if self.config.worker_intelligence and blueprint != "none":
+            from forge.worker_blueprint import WORKER_BLUEPRINT, WORKER_BLUEPRINT_COMPACT
+            preamble = WORKER_BLUEPRINT if blueprint == "full" else WORKER_BLUEPRINT_COMPACT
+            prompt = preamble + prompt
+
+        logger.info("Running Claude Code CLI — %d chars prompt (cwd=%s, blueprint=%s)",
+                     len(prompt), "project" if needs_filesystem else "neutral", blueprint)
 
         cmd = [
             self._claude_bin,
@@ -437,7 +465,6 @@ class Runner:
             "--model", self.config.claude_model,
             "--dangerously-skip-permissions",
             "--verbose",
-            "--strict-mcp-config",
         ]
 
         max_retries = 5
@@ -672,4 +699,4 @@ no explanation, just the prompt that will be sent directly to Deep Think.
 Make it 1,000-3,000 words. Be specific, structured, and thorough."""
 
         logger.info("Claude crafting prompt for Deep Think")
-        return self.run_claude(meta_prompt, timeout=300, needs_filesystem=False)
+        return self.run_claude(meta_prompt, timeout=300, needs_filesystem=False, blueprint="compact")

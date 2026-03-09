@@ -645,8 +645,10 @@ def run(
     # Claude only does functional smoke, interfaces, edge cases, deps.
     logger.info("Stress test pass 3: Claude functional tests")
     claude_prompt = _CLAUDE_STRESS_PROMPT.format(changes_summary=changes_summary)
+    from forge.worker_blueprint import STAGE_7_SUPPLEMENT
+    claude_prompt = STAGE_7_SUPPLEMENT + "\n" + claude_prompt
     try:
-        claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout, needs_filesystem=True)
+        claude_results = runner.run_claude(claude_prompt, timeout=config.stress_timeout, needs_filesystem=True, blueprint="full")
         results_parts.append("# PASS 3: CLAUDE FUNCTIONAL TESTS\n" + claude_results)
     except Exception as e:
         results_parts.append(f"# PASS 3: CLAUDE FUNCTIONAL TESTS\nERROR: {e}")
@@ -659,8 +661,10 @@ def run(
         changes_summary=changes_summary,
         codebase=codebase,
     )
+    from forge.worker_blueprint import JIM_REGRESSION_SUPPLEMENT
+    jim_prompt = JIM_REGRESSION_SUPPLEMENT + "\n" + jim_prompt
     try:
-        jim_results = runner.run_gemini(jim_prompt)
+        jim_results = runner.run_gemini(jim_prompt, blueprint="full")
         results_parts.append("# PASS 4: JIM REGRESSION SCAN\n" + jim_results)
     except Exception as e:
         results_parts.append(f"# PASS 4: JIM REGRESSION SCAN\nERROR: {e}")
@@ -677,7 +681,7 @@ def run(
     )
     try:
         claude_token_results = runner.run_claude(
-            claude_token_prompt, timeout=config.stress_timeout, needs_filesystem=True
+            claude_token_prompt, timeout=config.stress_timeout, needs_filesystem=True, blueprint="compact"
         )
     except Exception as e:
         claude_token_results = f"ERROR: {e}"

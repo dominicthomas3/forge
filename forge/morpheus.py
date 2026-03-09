@@ -520,7 +520,8 @@ class Morpheus:
         )
 
         try:
-            result = await asyncio.to_thread(self.runner.run_gemini, prompt, 60)
+            # No blueprint for Morpheus — character immersion requires a clean prompt
+            result = await asyncio.to_thread(self.runner.run_gemini, prompt, 60, "none")
             return result.strip()
         except Exception as e:
             # Fallback to seed messages if Gemini fails
@@ -941,7 +942,9 @@ class Morpheus:
         )
 
         try:
-            return await asyncio.to_thread(self.runner.run_claude, prompt, 600)
+            return await asyncio.to_thread(
+                self.runner.run_claude, prompt, 600, False, "compact",
+            )
         except Exception as e:
             logger.error("Evaluation failed: %s", e)
             return f"Evaluation failed: {e}"

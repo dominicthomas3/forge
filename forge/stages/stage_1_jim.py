@@ -122,6 +122,7 @@ def run(
     cycle_number: int,
     previous_results: dict | None = None,
     codebase: str | None = None,
+    cycle_learnings: list[str] | None = None,
 ) -> Path:
     """Run Jim's analysis. Returns path to the output file."""
     output_path = cycle_dir / "01-jim-analysis.md"
@@ -170,8 +171,21 @@ def run(
             codebase=codebase,
         )
 
-    # Run Jim (Gemini 3.1 Pro)
-    result = runner.run_gemini(prompt)
+    # Inject stage-specific supplement
+    from forge.worker_blueprint import JIM_ANALYSIS_SUPPLEMENT
+    prompt = JIM_ANALYSIS_SUPPLEMENT + "\n" + prompt
+
+    # Inject cross-cycle learning context (accumulated from previous cycles)
+    if cycle_learnings:
+        learning_block = (
+            "\n## CROSS-CYCLE LEARNING (patterns from previous cycles — do NOT repeat these mistakes)\n"
+            + "\n".join(f"- {l}" for l in cycle_learnings)
+            + "\n\nAddress these known issues in your plan. If they recur, escalate the fix priority.\n"
+        )
+        prompt = learning_block + "\n" + prompt
+
+    # Run Jim (Gemini 3.1 Pro) with full intelligence blueprint
+    result = runner.run_gemini(prompt, blueprint="full")
 
     # Save output
     output_path.write_text(result, encoding="utf-8")

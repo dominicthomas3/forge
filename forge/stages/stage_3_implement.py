@@ -78,8 +78,12 @@ def run(
 
     prompt = _IMPLEMENTATION_PROMPT.format(deep_think_plan=deep_think_plan)
 
+    # Append stage-specific supplement to the blueprint
+    from forge.worker_blueprint import STAGE_3_SUPPLEMENT
+    prompt = STAGE_3_SUPPLEMENT + "\n" + prompt
+
     # Run Claude Code with full file access — generous timeout for multi-file edits
-    result = runner.run_claude(prompt)
+    result = runner.run_claude(prompt, blueprint="full")
 
     # Save output
     output_path.write_text(result, encoding="utf-8")

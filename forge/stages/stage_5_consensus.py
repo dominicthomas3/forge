@@ -203,8 +203,12 @@ def run(
         deep_think_plan=deep_think_plan,
     )
 
+    # Inject stage-specific review supplement
+    from forge.worker_blueprint import JIM_REVIEW_SUPPLEMENT
+    prompt = JIM_REVIEW_SUPPLEMENT + "\n" + prompt
+
     logger.info("Phase A: Jim blind independent review")
-    jim_review = runner.run_gemini(prompt)
+    jim_review = runner.run_gemini(prompt, blueprint="full")
 
     # Save Jim's independent review separately
     jim_independent_path.write_text(jim_review, encoding="utf-8")

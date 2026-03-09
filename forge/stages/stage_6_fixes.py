@@ -72,8 +72,12 @@ def run(
 
     prompt = _FIX_PROMPT.format(consensus_report=consensus_report)
 
+    # Append stage-specific supplement to the blueprint
+    from forge.worker_blueprint import STAGE_6_SUPPLEMENT
+    prompt = STAGE_6_SUPPLEMENT + "\n" + prompt
+
     # Run Claude Code with file access — moderate timeout
-    result = runner.run_claude(prompt, timeout=900)
+    result = runner.run_claude(prompt, timeout=900, blueprint="full")
 
     output_path.write_text(result, encoding="utf-8")
     logger.info("Fixes applied log saved: %s (%d chars)", output_path, len(result))
