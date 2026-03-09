@@ -440,7 +440,10 @@ class Runner:
             "--strict-mcp-config",
         ]
 
-        while True:
+        max_retries = 5
+        retry_count = 0
+
+        while retry_count < max_retries:
             try:
                 # Always pipe prompt via stdin — avoids Windows command-line
                 # length limits and quoting issues, especially under nohup.
@@ -477,9 +480,11 @@ class Runner:
 
                 if result.returncode != 0:
                     if not result.stdout.strip():
+                        retry_count += 1
                         logger.error(
-                            "Claude CLI failed (exit %d): %s. Retrying in 60 seconds...",
-                            result.returncode, (result.stderr or result.stdout)[:500]
+                            "Claude CLI failed (exit %d): %s. Retry %d/%d in 60s...",
+                            result.returncode, (result.stderr or result.stdout)[:500],
+                            retry_count, max_retries,
                         )
                         time.sleep(60)
                         continue
@@ -489,9 +494,19 @@ class Runner:
                     )
                 break
             except subprocess.TimeoutExpired:
-                logger.error("Claude CLI killed after timeout. Retrying in 60 seconds...")
+                retry_count += 1
+                logger.error(
+                    "Claude CLI killed after timeout. Retry %d/%d in 60s...",
+                    retry_count, max_retries,
+                )
                 time.sleep(60)
                 continue
+
+        if retry_count >= max_retries:
+            raise RunnerError(
+                f"Claude CLI failed after {max_retries} retries",
+                stdout="", stderr="Exhausted all retries",
+            )
 
         return result.stdout
 

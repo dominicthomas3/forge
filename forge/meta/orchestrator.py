@@ -276,17 +276,25 @@ class MetaOrchestrator:
         ]
         if targeting_path and targeting_path.exists():
             cmd.extend(["--targeting-config", str(targeting_path)])
+        # Pass API key via environment variable (not CLI args — visible in ps/tasklist)
+        env_override = {}
         if self.config.google_api_key:
-            cmd.extend(["--google-api-key", self.config.google_api_key])
+            env_override["GOOGLE_API_KEY"] = self.config.google_api_key
 
         logger.info("Morpheus subprocess: %s", " ".join(cmd[:6]) + "...")
 
         try:
+            # Merge env overrides (API key) into a clean copy of the environment
+            import os as _os
+            sub_env = _os.environ.copy()
+            sub_env.update(env_override)
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(Path(__file__).parent.parent.parent),  # forge/ root
+                env=sub_env,
             )
 
             # Monitor with timeout
@@ -560,26 +568,27 @@ class MetaOrchestrator:
             logger.warning("Git tag failed: %s", e)
 
     def _rollback_to_best(self) -> None:
-        """Roll back to the best known checkpoint."""
+        """Roll back to the best known checkpoint.
+
+        Uses 'git reset --hard' only (no 'git clean -fd') to avoid deleting
+        untracked files that may contain user data, configs, or work-in-progress.
+        New files added by Forge since the checkpoint become untracked but are
+        NOT deleted — safe for manual review.
+        """
         tag = f"meta-checkpoint-{self.state.best_iteration}"
+        cwd = str(self.config.target_project)
         try:
+            # Stash any uncommitted changes as a safety net before hard reset
             subprocess.run(
-                ["git", "checkout", "--", "."],
-                capture_output=True,
-                cwd=str(self.config.target_project),
-            )
-            subprocess.run(
-                ["git", "clean", "-fd"],
-                capture_output=True,
-                cwd=str(self.config.target_project),
+                ["git", "stash", "push", "-m", f"meta-rollback-safety-{tag}"],
+                capture_output=True, text=True, cwd=cwd,
             )
             result = subprocess.run(
                 ["git", "reset", "--hard", tag],
-                capture_output=True, text=True,
-                cwd=str(self.config.target_project),
+                capture_output=True, text=True, cwd=cwd,
             )
             if result.returncode == 0:
-                logger.info("Rolled back to %s", tag)
+                logger.info("Rolled back to %s (untracked files preserved)", tag)
             else:
                 logger.warning("Rollback failed: %s", result.stderr)
         except Exception as e:

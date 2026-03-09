@@ -19,6 +19,7 @@ import asyncio
 import logging
 import os
 import platform
+import secrets
 import shutil
 import socket
 import subprocess
@@ -307,6 +308,12 @@ Examples:
 
         if args.mode == "live" and task_description:
             async def run_pipeline():
+                # Guard: prevent duplicate orchestrators on page refresh
+                if hasattr(app, '_forge_pipeline_running') and app._forge_pipeline_running:
+                    logging.warning("Pipeline already running — ignoring duplicate launch from page refresh")
+                    return
+                app._forge_pipeline_running = True
+
                 from forge.orchestrator import Orchestrator
 
                 orchestrator = Orchestrator(
@@ -322,6 +329,8 @@ Examples:
                     await loop.run_in_executor(None, orchestrator.run)
                 except Exception as e:
                     logging.exception("Pipeline crashed: %s", e)
+                finally:
+                    app._forge_pipeline_running = False
 
             asyncio.get_running_loop().create_task(run_pipeline())
 
@@ -374,7 +383,7 @@ Examples:
             native=False,         # Server only — no NiceGUI native mode
             reconnect_timeout=30.0,
             storage_secret=os.environ.get(
-                "FORGE_SESSION_SECRET", f"forge-session-{os.getpid()}"
+                "FORGE_SESSION_SECRET", secrets.token_hex(32)
             ),
             on_air=None,
         )
