@@ -203,6 +203,20 @@ class Orchestrator:
                 self.consecutive_clean = 0
                 logger.info("Issues found — convergence counter reset")
 
+            # Stuck detection: if the same failures repeat 3+ cycles, inject a
+            # strategy hint so Jim tries a different approach instead of looping.
+            if len(self.cycle_results) >= 3:
+                recent_verdicts = [r.get("stress_verdict") for r in self.cycle_results[-3:]]
+                if all(v == "FAIL" for v in recent_verdicts):
+                    stuck_hint = (
+                        "WARNING: 3 consecutive FAIL cycles detected. The current approach "
+                        "is not converging. Consider: (1) a fundamentally different implementation "
+                        "strategy, (2) reverting problematic changes and tackling a smaller scope, "
+                        "(3) checking if the test expectations themselves are wrong."
+                    )
+                    self._cycle_learnings.append(stuck_hint)
+                    logger.warning("STUCK DETECTED: 3 consecutive FAILs — injecting strategy hint")
+
             # Git checkpoint
             if self.config.git_checkpoint:
                 self._git_checkpoint(f"forge: cycle {self.cycle} complete")
@@ -424,6 +438,8 @@ class Orchestrator:
                     runner=self.runner,
                     consensus_path=consensus_path,
                     cycle_number=self.cycle,
+                    claude_review_path=review_path,
+                    jim_review_path=cycle_dir / "05a-jim-independent-review.md",
                 )
                 self.event_bus.emit_simple(
                     EventType.STAGE_COMPLETED, cycle=self.cycle, stage=6,

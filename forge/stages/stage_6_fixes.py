@@ -62,6 +62,8 @@ def run(
     runner: Runner,
     consensus_path: Path,
     cycle_number: int,
+    claude_review_path: Path | None = None,
+    jim_review_path: Path | None = None,
 ) -> Path:
     """Run fix application. Returns path to the output file."""
     output_path = cycle_dir / "06-fixes-applied.log"
@@ -70,7 +72,17 @@ def run(
 
     consensus_report = consensus_path.read_text(encoding="utf-8")
 
-    prompt = _FIX_PROMPT.format(consensus_report=consensus_report)
+    # Enrich with full issue descriptions from both reviewers so Claude
+    # knows WHAT to fix, not just WHICH files to fix.
+    reviewer_context = ""
+    if claude_review_path and claude_review_path.exists():
+        claude_review = claude_review_path.read_text(encoding="utf-8", errors="replace")
+        reviewer_context += f"\n\n--- CLAUDE'S REVIEW (Stage 4) — issue details ---\n{claude_review[:4000]}\n"
+    if jim_review_path and jim_review_path.exists():
+        jim_review = jim_review_path.read_text(encoding="utf-8", errors="replace")
+        reviewer_context += f"\n\n--- JIM'S REVIEW (Stage 5a) — issue details ---\n{jim_review[:4000]}\n"
+
+    prompt = _FIX_PROMPT.format(consensus_report=consensus_report + reviewer_context)
 
     # Append stage-specific supplement to the blueprint
     from forge.worker_blueprint import STAGE_6_SUPPLEMENT
